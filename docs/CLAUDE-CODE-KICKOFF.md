@@ -31,6 +31,37 @@ nur den Auftrag für die nächste Sitzung. Alles ab `---` kopieren.
 > Abschnitt 5.3 ehrlich beantworten. Ein Loop-Gerät auf dem Dateisystem eines
 > Runners misst das Dateisystem, nicht die Platte — genau der Fall, vor dem 5.3
 > warnt.
+>
+> **Auf Windows geht es über WSL2, aber nicht ohne eigenen Kernel.** Microsofts
+> WSL-Kernel hat `CONFIG_BLK_DEV_UBLK` und `CONFIG_DM_DUST` nicht gesetzt;
+> `CONFIG_DM_FLAKEY=m` ist dagegen da. Der Umbau dauert etwa 15 Minuten Bauzeit:
+>
+> ```bash
+> apt-get install -y build-essential flex bison libssl-dev libelf-dev bc dwarves
+> git clone --depth 1 --branch linux-msft-wsl-6.18.y \
+>   https://github.com/microsoft/WSL2-Linux-Kernel /usr/src/wsl-kernel
+> cd /usr/src/wsl-kernel
+> cp Microsoft/config-wsl .config
+> ./scripts/config --file .config \
+>   --enable CONFIG_BLK_DEV_UBLK --module CONFIG_DM_DUST --module CONFIG_DM_FLAKEY
+> make olddefconfig && make -j"$(nproc)" && make modules_install
+> ```
+>
+> Dann `arch/x86/boot/bzImage` nach Windows kopieren und in `%USERPROFILE%\.wslconfig`
+> eintragen:
+>
+> ```ini
+> [wsl2]
+> kernel=C:\\Pfad\\zu\\bzImage
+> ```
+>
+> Nach `wsl --shutdown` existiert `/dev/ublk-control`, und `dmsetup targets`
+> kennt `dust`, `flakey` und `error`. Ausgangspunkt ist Microsofts eigene
+> Konfiguration — wer stattdessen `defconfig` nimmt, verliert Dateizugriff und
+> Interop. Zurück zum Standardkernel führt das Löschen der `.wslconfig`.
+>
+> Der Flush-Test ist auch hier nicht ehrlich zu beantworten: Darunter liegt eine
+> VHDX auf NTFS.
 
 ---
 
