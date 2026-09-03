@@ -1,96 +1,160 @@
-# Startprompt für Claude Code
+# Startprompt für Claude Code — Meilenstein 2
 
 `CLAUDE.md` liegt im Repo-Root und wird automatisch gelesen. Dieser Prompt gibt
 nur den Auftrag für die nächste Sitzung. Alles ab `---` kopieren.
+
+> **Diese Sitzung braucht Linux.** Kernel ≥ 6.0 mit geladenem `ublk_drv`, Root
+> für das Anlegen der Geräte. Auf einer Maschine ohne Kernelzugriff ist der
+> Auftrag nicht ausführbar — das ist kein Grund für eine Attrappe, sondern ein
+> Grund, die Maschine zu wechseln.
 
 ---
 
 Lies zuerst `CLAUDE.md`, `README.md` und `docs/FORMAT.md`. Sie sind normativ —
 wenn dein Code ihnen widerspricht, ist der Code der Fehler.
 
-Zwei Aufgaben, in dieser Reihenfolge.
+## Wo das Projekt steht
 
-## Aufgabe 1 — Fuzz-Targets für `format/`
+Meilenstein 1 ist abgeschlossen. `docs/FORMAT.md` steht bei **Version 1.0 und
+ist eingefroren**: kein Offset, keine Feldbedeutung und keine Gültigkeitsregel
+ändert sich noch. Erweitert wird nur über die Feature-Bits aus Abschnitt 4.1.
 
-Lege `format/fuzz/` mit `cargo-fuzz` an, zwei Targets:
+`format/tests/golden.rs` hält das Byte-Layout als Literale fest. **Schlägt einer
+dieser Tests fehl, ist die Zusage von 1.0 gebrochen** — dann nimmst du den Code
+zurück, nicht die Erwartung.
 
-- `superblock_decode` — beliebige Bytes in `Superblock::decode`
-- `log_header_decode` — beliebige Bytes in `LogRecordHeader::decode`
+Vier Crates sind fertig und brauchen kein Gerät:
 
-Beide dürfen unter keinen Umständen paniken, endlos laufen oder allozieren, was
-die Eingabe nicht deckt. Ergänze ein drittes Target `superblock_roundtrip`, das
-aus dem Fuzz-Input einen gültigen `Superblock` konstruiert, kodiert, dekodiert
-und auf Gleichheit prüft.
+| | |
+|---|---|
+| `format/` | Superblock samt Member-Zustand, `assemble`, Write-Log mit Ringpuffer und Recovery |
+| `parity/` | GF(2⁸), P+Q, alle Ein- und Zwei-Slot-Rekonstruktionen |
+| `engine/` | Geometrie, dreckige Blöcke, Rebuild-Plan, Schreibpfad — reine Rechnung |
+| `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild |
 
-Ein viertes Target `chain_replay`: `ChainValidator` gegen eine aus dem
-Fuzz-Input abgeleitete Folge von Records. Invariante: Sobald einmal
-`StopReplay` kam, darf nie wieder `Accept` kommen — egal wie gültig ein
-späterer Record für sich aussieht. An dieser Regel hängt, ob ein Replay nach
-Absturz alte Daten über neue schreibt.
+179 Tests, sechs Fuzz-Targets, CI grün. **Was `engine/` schon kann, baust du
+nicht neu.** Sieh dir vorher an: `BlockGeometry`, `dirty_blocks`,
+`RebuildPlan`, `WriteBatch`, `required_parity_update`, `data_is_valid_at`.
 
-Lass jedes Target mindestens fünf Minuten laufen und berichte, was gefunden
-wurde. Jeder Crash wird als Regressionstest in `format/tests/roundtrip.rs`
-festgehalten, bevor du ihn behebst.
+## Deine Aufgaben, in dieser Reihenfolge
 
-Dann ein GitHub-Actions-Workflow `.github/workflows/ci.yml`: `cargo test`,
-`cargo clippy -- -D warnings`, `cargo fmt --check`, plus ein kurzer Fuzz-Lauf
-pro Target auf jedem Push.
+### 1 — Blockgeräte öffnen und Superblöcke schreiben
 
-## Aufgabe 2 — Crate `parity/`
+Das erste Mal, dass Ferrite eine echte Platte anfasst. Nur das, nichts weiter:
 
-Reine Rechnung, keine I/O, keine Dependencies. Vollständig testbar ohne
-Hardware, deshalb kommt es vor der Engine.
+- Ein Gerät öffnen, seine Grösse ermitteln, `Superblock::fits_on_device` prüfen
+- Primären und Backup-Superblock lesen, über `Superblock::select` entscheiden
+- Beide schreiben — **primär zuerst, Backup nach einem Flush** (Abschnitt 3).
+  Die Reihenfolge ist der Grund, warum es zwei Kopien gibt; wer sie umdreht,
+  verliert bei einem Absturz beide auf einmal.
+- Ein Array anlegen: Superblöcke für Data-, Parity- und Log-Member schreiben,
+  danach über `assemble` wieder einlesen und vergleichen
 
-Inhalt:
+Der I/O-Pfad gehört in `engine/`, aber **hinter `#[cfg(target_os = "linux")]`**.
+Der Rechenkern darunter bleibt plattformunabhängig, damit `cargo test` überall
+läuft. Diese Trennung ist Absicht und der Grund, warum Meilenstein 1 ohne
+Hardware fertig wurde.
 
-- GF(2⁸) mit Polynom `0x11D`, Log-/Antilog-Tabellen zur Compile-Zeit
-- `compute_p(slots: &[&[u8]], out: &mut [u8])` — XOR über alle Slots
-- `compute_q(slots: &[&[u8]], out: &mut [u8])` — `⨁ⱼ gʲ · Dⱼ`, `g = 0x02`,
-  `j` ist der `slot_index`, nicht die Position im übergebenen Slice
-- Rekonstruktion: ein fehlender Data-Slot aus P; ein fehlender aus Q; zwei
-  fehlende Data-Slots aus P und Q; ein Data-Slot plus P; ein Data-Slot plus Q
-- **Zero-Extension:** Slots dürfen unterschiedlich lang sein. Ein kürzerer Slot
-  liest jenseits seines Endes als Nullbytes. Das ist keine Bequemlichkeit,
-  sondern die Regel, die gemischte Plattengrössen erlaubt.
+Offsets sind 4096-aligned, `O_DIRECT` ist damit möglich. Ob du es nimmst,
+entscheidest du — aber begründe es im Code, nicht im Commit.
 
-Tests, die ich sehen will:
+### 2 — Flush-Test, Abschnitt 5.3
 
-- Bekannte Vektoren für die GF-Arithmetik (Assoziativität, Inverse, `g` ist
-  Generator der multiplikativen Gruppe)
-- Round-Trip über zufällige Daten mit festem LCG wie in `format/tests`: P und Q
-  berechnen, ein bis zwei Slots löschen, rekonstruieren, auf Byte-Gleichheit
-  prüfen — über alle Kombinationen bei 4 bis 8 Slots
-- Derselbe Test mit **ungleich langen** Slots, inklusive eines Slots der Länge
-  null
-- Rekonstruktion eines Slots, der selbst nur Nullen enthält (fängt Fehler, die
-  ein zufälliger Test übersieht)
+Bisher steht die Regel nur im Dokument und ist von nichts abgedeckt. Vor der
+ersten Nutzung MUSS geprüft werden, ob das Log-Gerät `FLUSH` ehrlich beantwortet.
+Fällt der Test negativ aus oder ist er nicht durchführbar, läuft das Array im
+**Write-Through-Modus**: Der Write wird erst bestätigt, wenn Data-Member und
+Parität aktualisiert sind.
 
-Kein SIMD in dieser Runde. Erst korrekt, dann schnell — die Optimierung braucht
-die Tests als Netz und gehört in einen eigenen Commit mit Benchmark davor und
-danach.
+Sag im Bericht ausdrücklich, wie du den Test gebaut hast und was er auf deiner
+Hardware ergibt. Ein Flush-Test, der immer „ehrlich" sagt, ist schlimmer als
+keiner.
+
+### 3 — ublk-Target pro Data-Member
+
+Ein ublk-Gerät je Data-Member, das seine Payload-Region 1:1 abbildet. btrfs
+schreibt dorthin, Ferrite sitzt dazwischen und kommt so an jeden Write, ohne
+den Kernel zu patchen — das ist die Zeile „Stock-Kernel, Engine im Userspace"
+aus dem README.
+
+Diese Zuordnung steht nirgends geschrieben, sie folgt aus der Kerninvariante:
+Ein Gerät für den ganzen Pool wäre ein Striping-Layout, und dann wäre keine
+Platte mehr einzeln montierbar. Auf der rohen Platte liegt das Dateisystem
+entsprechend ab `payload_offset`, also 1 MiB — beim direkten Mounten braucht es
+diesen Offset. **Halte die Zuordnung im Code fest, sobald sie steht**; sie
+gehört zur Engine, nicht ins Formatdokument, aber sie darf nicht ungeschrieben
+bleiben.
+
+- **Read** im Normalfall durchreichen. Ist der Member an diesem Block nicht
+  brauchbar (`data_is_valid_at`), aus der Parität rekonstruieren.
+- **Write** zuerst als Record ins Log. Bestätigt wird, sobald der Record durable
+  ist — nicht früher und nicht später.
+
+### 4 — Schreibpfad verdrahten
+
+`engine::WriteBatch` gibt die Reihenfolge vor, halte dich daran:
+
+```
+Logged → [OldDataRead] → DataWritten → ParityWritten → Checkpointed
+```
+
+`OldDataRead` entfällt beim Neurechnen. **Kein Checkpoint vor durabler
+Parität** — der Checkpoint gibt Log-Platz frei, und wenn die Parität dann nicht
+passt, rekonstruiert das Array nach dem nächsten Plattenausfall Müll.
+
+Welches Verfahren erlaubt ist, sagt `required_parity_update`. Rate es nicht neu.
+
+### 5 — Rebuild
+
+`RebuildPlan` aus dem Superblock fortsetzen, Stapel rekonstruieren, **erst die
+Blöcke durable schreiben, dann den Fortschritt** in den Superblock. Andersherum
+meldest du nach einem Absturz Blöcke als fertig, die nie geschrieben wurden.
+
+`integration/tests/rebuild_resume.rs` spielt genau das im Speicher durch. Der
+Test auf echten Geräten muss dasselbe Ergebnis liefern.
+
+## Was offen ist und nicht geraten wird
+
+**Absturz im degradierten Betrieb.** Neurechnen der Parität scheitert am
+fehlenden Member, Fortschreiben am nach dem Absturz unzuverlässigen alten
+Inhalt. `required_parity_update` gibt dort `EngineError::CannotUpdateParity`
+zurück — das ist Absicht und kein Versehen.
+
+Wenn dir beim Bauen eine Lösung einfällt, schreib sie in den Bericht, aber
+implementiere sie nicht auf Verdacht. Der Fall gehört ins Crash-Harness aus
+Meilenstein 3, wo er sich nachweisen lässt statt begründen.
 
 ## Was ich nicht will
 
-Keine Engine, kein ublk, kein FUSE, nichts, das ein Blockgerät öffnet. Das
-Format ist noch nicht auf 1.0 eingefroren; bis dahin schreibt kein Code auf
-echte Platten.
+Kein FUSE, kein Pool-Namespace, keine Control plane. Das ist Meilenstein 4
+aufwärts.
 
-Keine Mocks für fehlende Hardware. Wenn etwas Kernelzugriff oder Root braucht,
-sag es, statt eine Attrappe zu bauen. Ein Mock, der etwas anderes testet als
-die Realität, ist in einem Speicherprojekt schlimmer als kein Test — er erzeugt
-Vertrauen, das nicht gedeckt ist.
+**Keine Mocks für fehlende Hardware.** Wenn etwas Kernelzugriff oder Root
+braucht, sag es, statt eine Attrappe zu bauen. Ein Mock, der etwas anderes
+testet als die Realität, ist in einem Speicherprojekt schlimmer als kein Test —
+er erzeugt Vertrauen, das nicht gedeckt ist.
 
-Melde dich, wenn `docs/FORMAT.md` an einer Stelle unklar oder widersprüchlich
-ist. Ein falsch geratenes Detail kostet später eine Formatversion.
+Loop-Geräte über `losetup` auf Sparse-Dateien sind **kein** Mock: Die
+Blockschicht des Kernels ist echt, und für die Entwicklung reichen sie. Für den
+Flush-Test aus Aufgabe 2 taugen sie nicht — dort misst du das Dateisystem
+darunter, nicht die Platte.
+
+Keine Formatänderung. Fällt dir eine Lücke auf, melde sie und beschreibe, welches
+Feature-Bit sie bräuchte. Ab 1.0 ist der reservierte Bereich der einzige Weg,
+und sein Nullwert muss das bisherige Verhalten bedeuten.
+
+Kein SIMD in `parity/`. Erst messen, dann optimieren, und mit Benchmark davor
+und danach in einem eigenen Commit.
 
 ## Abschluss
 
-Kurze Zusammenfassung: was geändert wurde, was die Fuzzer gefunden haben, und
-ob `docs/FORMAT.md` angefasst werden musste.
+Kurze Zusammenfassung: was gebaut wurde, was der Flush-Test auf deiner Hardware
+ergeben hat, was auf echten Geräten anders war als in der In-Memory-Generalprobe,
+und ob `docs/FORMAT.md` an einer Stelle nicht ausreicht — ohne sie zu ändern.
 
 ---
 
-Meilenstein 2 (`engine/`, das ublk-Target) und Meilenstein 3 (Crash-Harness)
-brauchen Kernel ≥ 6.0 mit geladenem `ublk_drv`, `dm-flakey`/`dm-dust` und Root.
-Dafür ist eine VM im Homelab der richtige Ort, nicht eine Umgebung ohne
-Kernelzugriff.
+Danach kommt Meilenstein 3, das Crash-Harness: `dm-flakey` und `dm-dust` für
+Lesefehler und stille Korruption, Power-Fail per `SIGKILL` an zufälligen Punkten
+im Schreibpfad, danach Replay und vollständige Paritätsverifikation. Ab dort in
+CI, und es blockiert Merges. Meilenstein 3 steht bewusst vor den Features.
