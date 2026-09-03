@@ -11,3 +11,11 @@ rust-version.workspace = true
 # Umgebung — Zufall und Zeit kommen als Parameter herein. Damit laesst sich die
 # Rekonstruktion vollstaendig pruefen, ohne eine Platte anzufassen.
 [dependencies]
+
+# Ohne Harness: `cargo bench` ruft einfach `main` auf. Das spart eine
+# Test-Dependency und den Nightly-Zwang von `#[bench]` — gemessen wird mit
+# `Instant`, und zwar im Bench-Target, nicht im Crate. Das Crate selbst bleibt
+# ohne Uhr (Regel 8).
+[[bench]]
+name = "throughput"
+harness = false
