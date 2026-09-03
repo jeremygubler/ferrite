@@ -59,6 +59,36 @@ const fn build_log() -> [u8; 256] {
     table
 }
 
+/// Der Reduktionsterm: das Polynom ohne sein hoechstes Bit.
+///
+/// Beim Verdoppeln faellt Bit 7 heraus; eingerechnet wird dann genau dieser
+/// Rest.
+pub const REDUCTION: u8 = (POLYNOMIAL & 0xFF) as u8;
+
+/// `a * g`, also die Verdopplung im Feld.
+///
+/// Ohne Tabelle und ohne Verzweigung: `(a as i8) >> 7` liefert `0xFF`, wenn
+/// Bit 7 gesetzt ist, sonst `0x00` — das arithmetische Schieben zieht das
+/// Vorzeichen nach. Damit wird der Reduktionsterm maskiert statt gesprungen.
+#[inline]
+pub fn double(a: u8) -> u8 {
+    let overflow = ((a as i8) >> 7) as u8;
+    (a << 1) ^ (overflow & REDUCTION)
+}
+
+/// Verdoppelt jedes Byte des Puffers.
+///
+/// Der Grund, warum es diese Funktion ueberhaupt gibt: Sie besteht aus Schieben,
+/// Maskieren und XOR und laesst sich deshalb vektorisieren. [`mul`] kann das
+/// nicht — ein Table-Lookup pro Byte ist ein Gather, und den bekommt der
+/// Compiler nicht in eine Vektorinstruktion.
+#[inline]
+pub fn double_in_place(target: &mut [u8]) {
+    for byte in target.iter_mut() {
+        *byte = double(*byte);
+    }
+}
+
 /// Produkt zweier Feldelemente.
 #[inline]
 pub fn mul(a: u8, b: u8) -> u8 {
@@ -132,6 +162,24 @@ mod tests {
             assert_eq!(mul(a, 1), a);
             assert_eq!(mul(1, a), a);
         }
+    }
+
+    #[test]
+    fn doubling_matches_multiplication_by_the_generator() {
+        // Die tabellenfreie Verdopplung muss fuer jedes Element dasselbe
+        // liefern wie der Weg ueber die Log-Tabellen. Daran haengt das gesamte
+        // Horner-Schema in `compute_q`.
+        for a in 0u8..=255 {
+            assert_eq!(double(a), mul(a, GENERATOR), "a={a}");
+        }
+    }
+
+    #[test]
+    fn doubling_a_buffer_matches_doubling_each_byte() {
+        let mut buffer: Vec<u8> = (0u8..=255).collect();
+        let expected: Vec<u8> = buffer.iter().map(|&byte| double(byte)).collect();
+        double_in_place(&mut buffer);
+        assert_eq!(buffer, expected);
     }
 
     #[test]

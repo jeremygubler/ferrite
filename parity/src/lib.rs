@@ -135,10 +135,12 @@ pub fn compute_p(data_slot_count: u8, slots: &[Slot<'_>], out: &mut [u8]) -> Res
 pub fn compute_q(data_slot_count: u8, slots: &[Slot<'_>], out: &mut [u8]) -> Result<()> {
     check_complete_set(data_slot_count, &[], slots)?;
     check_slot_set(slots, out.len())?;
-    out.fill(0);
+
+    let mut table = EMPTY_SLOTS;
     for slot in slots {
-        xor_scaled_into(out, slot.data(), slot.coefficient());
+        table[usize::from(slot.index())] = slot.data();
     }
+    q_into(out, &table, data_slot_count);
     Ok(())
 }
 
@@ -177,10 +179,14 @@ pub fn reconstruct_from_q(
     check_slot_set(survivors, q.len())?;
 
     // Zuerst alles Bekannte aus Q herausrechnen, uebrig bleibt g^target * D.
-    out.copy_from_slice(&q[..out.len()]);
+    // Der fehlende Slot steht nicht in der Tabelle und traegt damit nichts bei —
+    // genau das ist hier gewollt.
+    let mut table = EMPTY_SLOTS;
     for slot in survivors {
-        xor_scaled_into(out, slot.data(), slot.coefficient());
+        table[usize::from(slot.index())] = slot.data();
     }
+    q_into(out, &table, data_slot_count);
+    xor_into(out, &q[..out.len()]);
 
     // g^target ist nie null, das Inverse existiert also immer. Zurueckgegeben
     // wird der Fehler trotzdem, statt ihn anzunehmen.
@@ -234,12 +240,18 @@ pub fn reconstruct_two_from_pq(
         let sum_q = &mut scratch_q[..width];
 
         sum_p.copy_from_slice(&p[base..base + width]);
-        sum_q.copy_from_slice(&q[base..base + width]);
         for slot in survivors {
-            let chunk = window(slot.data(), base, width);
-            xor_into(sum_p, chunk);
-            xor_scaled_into(sum_q, chunk, slot.coefficient());
+            xor_into(sum_p, window(slot.data(), base, width));
         }
+
+        // Die Scheibe ist hier schon geschnitten, deshalb bekommt `q_into`
+        // eine Tabelle aus den Ausschnitten und rechnet ab Offset 0.
+        let mut table = EMPTY_SLOTS;
+        for slot in survivors {
+            table[usize::from(slot.index())] = window(slot.data(), base, width);
+        }
+        q_into(sum_q, &table, data_slot_count);
+        xor_into(sum_q, &q[base..base + width]);
 
         for offset in 0..width {
             let value_second = gf::mul(
@@ -302,11 +314,13 @@ pub fn reconstruct_data_and_q(
     check_slot_set(survivors, out_q.len())?;
     ensure_covers("out_q", out_q.len(), recovered.len())?;
 
-    out_q.fill(0);
+    let mut table = EMPTY_SLOTS;
     for slot in survivors {
-        xor_scaled_into(out_q, slot.data(), slot.coefficient());
+        table[usize::from(slot.index())] = slot.data();
     }
-    xor_scaled_into(out_q, recovered, gf::g_pow(target));
+    // Der eben wiederhergestellte Slot gehoert mit in die Summe.
+    table[usize::from(target)] = recovered;
+    q_into(out_q, &table, data_slot_count);
     Ok(())
 }
 
@@ -322,11 +336,43 @@ fn xor_into(out: &mut [u8], data: &[u8]) {
     }
 }
 
-/// Wie [`xor_into`], aber mit `coefficient` multipliziert.
-#[inline]
-fn xor_scaled_into(out: &mut [u8], data: &[u8], coefficient: u8) {
-    for (target, &byte) in out.iter_mut().zip(data) {
-        *target ^= gf::mul(coefficient, byte);
+/// Nutzdaten aller Slots, nach `slot_index` abgelegt.
+///
+/// Ein Index ohne Slot traegt einen leeren Slice. Das ist keine
+/// Sonderbehandlung, sondern genau die Zero-Extension: Wer nichts beitraegt,
+/// beitraegt Nullbytes.
+type SlotTable<'a> = [&'a [u8]; MAX_DATA_SLOTS as usize];
+
+const EMPTY_SLOTS: SlotTable<'static> = [&[]; MAX_DATA_SLOTS as usize];
+
+/// `Q[i] = Summe g^j * D_j[i]`, nach dem Horner-Schema.
+///
+/// Statt fuer jedes Byte `g^j` aus der Tabelle zu holen, wird der
+/// Zwischenstand einmal je Slot verdoppelt:
+///
+/// ```text
+/// Q = D_0 ^ g(D_1 ^ g(D_2 ^ … ^ g·D_n-1))
+/// ```
+///
+/// Dieselbe Summe, aber ohne Table-Lookup — und damit vektorisierbar. Die
+/// Slots muessen dafuer in absteigender Index-Reihenfolge durchlaufen werden,
+/// nicht in der Reihenfolge des uebergebenen Slices; genau dafuer ist
+/// [`SlotTable`] da.
+///
+/// Gerechnet wird in Scheiben. Ohne sie liefe der Akkumulator `count` Mal ueber
+/// die volle Blockgroesse — bei 16 MiB Parity-Bloecken waere das
+/// speicherbandbreitenbegrenzt statt rechenbegrenzt. So bleibt er im Cache.
+fn q_into(out: &mut [u8], table: &SlotTable<'_>, data_slot_count: u8) {
+    let mut base = 0usize;
+    while base < out.len() {
+        let width = SCRATCH_WIDTH.min(out.len() - base);
+        let chunk = &mut out[base..base + width];
+        chunk.fill(0);
+        for index in (0..usize::from(data_slot_count)).rev() {
+            gf::double_in_place(chunk);
+            xor_into(chunk, window(table[index], base, width));
+        }
+        base += width;
     }
 }
 

@@ -27,7 +27,7 @@ use ferrite_parity::{compute_p, compute_q, reconstruct_from_p, reconstruct_two_f
 /// Ein Parity-Block der Standardgroesse aus `Superblock::new`.
 const BLOCK: usize = 64 * 1024;
 /// Mindestdauer je Messung. Kuerzer, und die Uhr dominiert das Ergebnis.
-const MIN_DURATION: Duration = Duration::from_millis(300);
+const MIN_DURATION: Duration = Duration::from_millis(100);
 
 /// Derselbe feste LCG wie in den Tests: reproduzierbare Daten ohne Dependency.
 struct Lcg(u64);
@@ -47,25 +47,40 @@ impl Lcg {
     }
 }
 
+/// Wie oft jede Messung wiederholt wird. Genommen wird das **Minimum**.
+///
+/// Der Grund steht in der Messung selbst: Bei zwei aufeinanderfolgenden Laeufen
+/// desselben unveraenderten Codes standen 15,8 und 23,7 GB/s. Rauschen macht
+/// eine Messung nur langsamer, nie schneller — der schnellste Durchgang ist
+/// deshalb der ehrlichste Schaetzwert, und der Mittelwert waere hier eine
+/// Aussage ueber die Hintergrundlast.
+const REPEATS: usize = 5;
+
 /// Fuehrt `body` so oft aus, bis [`MIN_DURATION`] erreicht ist, und liefert die
-/// Zeit je Durchlauf.
+/// beste beobachtete Zeit je Durchlauf.
 fn measure(mut body: impl FnMut()) -> Duration {
     // Einmal warmlaufen, damit Tabellen und Caches nicht in die Messung fallen.
     body();
 
     let mut rounds = 1u32;
-    loop {
-        let start = Instant::now();
-        for _ in 0..rounds {
-            body();
+    let mut best = Duration::MAX;
+    for _ in 0..REPEATS {
+        loop {
+            let start = Instant::now();
+            for _ in 0..rounds {
+                body();
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= MIN_DURATION {
+                best = best.min(elapsed / rounds);
+                break;
+            }
+            // Hochtasten statt raten. Der Faktor 4 haelt die Anlaufzeit kurz;
+            // die gefundene Rundenzahl gilt danach fuer alle Wiederholungen.
+            rounds = rounds.saturating_mul(4);
         }
-        let elapsed = start.elapsed();
-        if elapsed >= MIN_DURATION {
-            return elapsed / rounds;
-        }
-        // Hochtasten statt raten. Der Faktor 4 haelt die Anlaufzeit kurz.
-        rounds = rounds.saturating_mul(4);
     }
+    best
 }
 
 fn throughput_mb_s(bytes: usize, per_round: Duration) -> f64 {

@@ -470,3 +470,89 @@ fn computing_parity_with_an_out_of_range_slot_count_is_refused() {
         Err(ParityError::InvalidSlotCount { count: 65 })
     ));
 }
+
+/// Q gegen die Definition aus Abschnitt 2, nicht gegen die Implementierung.
+///
+/// `compute_q` rechnet seit dem Horner-Umbau nicht mehr Byte fuer Byte mit
+/// `g^j` aus der Tabelle, sondern verdoppelt einen Zwischenstand. Das ist
+/// dieselbe Summe — dieser Test ist der Beweis, und er bleibt richtig, egal wie
+/// die Funktion darunter arbeitet.
+#[test]
+fn q_matches_the_definition_over_many_shapes() {
+    let mut rng = Lcg::new(0x0A17_C0DE);
+
+    for count in 1..=12u8 {
+        for round in 0..8 {
+            // Ungleiche Laengen, darunter leere Slots und ein Fall, der ueber
+            // mehrere Arbeitsscheiben laeuft.
+            let longest = match round {
+                0 => 1,
+                1 => 4095,
+                2 => 4096,
+                3 => 4097,
+                4 => 2 * 4096 + 1234,
+                _ => 1 + rng.below(9000) as usize,
+            };
+            let payloads: Vec<Vec<u8>> = (0..count)
+                .map(|slot| {
+                    // Jeder dritte Slot bleibt leer.
+                    if slot % 3 == 2 {
+                        Vec::new()
+                    } else {
+                        let len = rng.below(longest as u64 + 1) as usize;
+                        rng.bytes(len)
+                    }
+                })
+                .collect();
+            let parity_len = payloads.iter().map(Vec::len).max().unwrap_or(0).max(1);
+
+            let slots = slots_of(&payloads, &[]);
+            let mut actual = vec![0u8; parity_len];
+            compute_q(count, &slots, &mut actual).unwrap();
+
+            // Die Definition, direkt hingeschrieben: Summe g^j * D_j[i], wobei
+            // D_j jenseits seines Endes null liest.
+            let mut expected = vec![0u8; parity_len];
+            for (index, payload) in payloads.iter().enumerate() {
+                let coefficient = ferrite_parity::gf::g_pow(index as u8);
+                for (offset, target) in expected.iter_mut().enumerate() {
+                    let byte = payload.get(offset).copied().unwrap_or(0);
+                    *target ^= ferrite_parity::gf::mul(coefficient, byte);
+                }
+            }
+
+            assert_eq!(
+                actual, expected,
+                "count={count} round={round} longest={longest}"
+            );
+        }
+    }
+}
+
+/// Dasselbe fuer den Fall, dass die Slots in verwuerfelter Reihenfolge kommen.
+///
+/// Das Horner-Schema laeuft absteigend nach `slot_index`. Wer stattdessen die
+/// Reihenfolge des uebergebenen Slices nimmt, bekommt hier ein anderes Q.
+#[test]
+fn q_does_not_depend_on_the_order_of_the_slice() {
+    let mut rng = Lcg::new(0x0A17_5EED);
+    let count = 7u8;
+    let payloads: Vec<Vec<u8>> = (0..count).map(|_| rng.bytes(5000)).collect();
+    let parity_len = 5000;
+
+    let ordered = slots_of(&payloads, &[]);
+    let mut expected = vec![0u8; parity_len];
+    compute_q(count, &ordered, &mut expected).unwrap();
+
+    let mut shuffled = ordered.clone();
+    shuffled.reverse();
+    let mut actual = vec![0u8; parity_len];
+    compute_q(count, &shuffled, &mut actual).unwrap();
+    assert_eq!(actual, expected, "umgekehrte Reihenfolge");
+
+    shuffled.swap(0, 4);
+    shuffled.swap(1, 6);
+    let mut actual = vec![0u8; parity_len];
+    compute_q(count, &shuffled, &mut actual).unwrap();
+    assert_eq!(actual, expected, "vertauschte Paare");
+}
