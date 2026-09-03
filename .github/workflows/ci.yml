@@ -12,7 +12,7 @@ jobs:
     name: Test, Clippy, Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain
         run: |
@@ -56,7 +56,7 @@ jobs:
           - log_ring_replay
           - assemble_array
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain
         run: |
