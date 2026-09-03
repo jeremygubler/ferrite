@@ -93,10 +93,10 @@ von Anfang an mitläuft.
 | Komponente | |
 |---|---|
 | `docs/FORMAT.md` | **Version 1.0 — eingefroren** |
-| `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 100 Tests grün |
-| `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 31 Tests grün |
+| `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
+| `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, plattformunabhängig — 44 Tests grün. ublk-Target offen, braucht Linux |
+| `engine/` | Planung von Schreibpfad und Rebuild, plattformunabhängig — 47 Tests grün. ublk-Target offen, braucht Linux |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |

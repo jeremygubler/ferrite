@@ -438,3 +438,13 @@ fn a_record_that_exactly_fills_the_region_needs_no_padding() {
         .count();
     assert_eq!(padding_count, 0);
 }
+
+#[test]
+fn the_ring_reports_how_many_sectors_it_has() {
+    // Die Zahl begrenzt den Replay auf eine Runde. Waere sie zu gross,
+    // liefe er im Kreis; waere sie zu klein, brichte er zu frueh ab.
+    for sectors in [1usize, 2, 8, 64] {
+        let region = vec![0u8; sectors * LOG_SECTOR_SIZE];
+        assert_eq!(LogRing::new(&region).unwrap().sector_count(), sectors);
+    }
+}

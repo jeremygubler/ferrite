@@ -556,3 +556,27 @@ fn q_does_not_depend_on_the_order_of_the_slice() {
     compute_q(count, &shuffled, &mut actual).unwrap();
     assert_eq!(actual, expected, "vertauschte Paare");
 }
+
+/// `Slot::byte_at` ist die Zero-Extension-Regel als ausfuehrbarer Satz.
+///
+/// Die Rechenpfade schneiden inzwischen Slices statt einzelne Bytes zu holen,
+/// aber die Regel steht hier am Typ, und sie muss stimmen: Jenseits seines
+/// Endes liest ein Slot Nullbytes — nicht Muell und keinen Fehler.
+#[test]
+fn a_slot_reads_as_zero_beyond_its_end() {
+    let payload = [0xAAu8, 0xBB, 0xCC];
+    let slot = Slot::new(0, &payload).unwrap();
+
+    assert_eq!(slot.byte_at(0), 0xAA);
+    assert_eq!(slot.byte_at(2), 0xCC);
+    assert_eq!(slot.byte_at(3), 0, "erstes Byte hinter dem Ende");
+    assert_eq!(slot.byte_at(usize::MAX), 0);
+
+    // Ein leerer Slot liest ueberall null und ist damit der Grenzfall der
+    // Regel, nicht ihre Ausnahme.
+    let empty: [u8; 0] = [];
+    let slot = Slot::new(3, &empty).unwrap();
+    assert!(slot.is_empty());
+    assert_eq!(slot.len(), 0);
+    assert_eq!(slot.byte_at(0), 0);
+}

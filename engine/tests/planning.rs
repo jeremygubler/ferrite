@@ -11,6 +11,7 @@ use ferrite_engine::{
     data_is_valid_at, dirty_blocks, total_blocks, BlockGeometry, EngineError, RebuildPlan,
     WriteTarget,
 };
+use ferrite_format::assemble::assemble;
 use ferrite_format::log::LogRecordHeader;
 use ferrite_format::superblock::{MemberState, Role, Superblock};
 use ferrite_format::{FormatError, Uuid};
@@ -367,4 +368,72 @@ fn beyond_its_own_payload_every_member_reads_as_zero() {
     assert!(!data_is_valid_at(&superblock, 3, LOG2));
     assert!(data_is_valid_at(&superblock, 4, LOG2));
     assert!(data_is_valid_at(&superblock, 99, LOG2));
+}
+
+// --- Geometrie aus einem echten Array -------------------------------------
+
+/// Superblock fuer ein Array mit `DATA_SLOTS` Data-Slots.
+fn array_member(role: Role, slot_index: u16, blocks: u64, seed: u8) -> Superblock {
+    let mut superblock = Superblock::new(
+        Uuid::from_random_bytes([0xC7; 16]),
+        Uuid::from_random_bytes([seed; 16]),
+        role,
+        4,
+        blocks * BLOCK,
+    );
+    superblock.parity_block_size_log2 = LOG2;
+    superblock.slot_index = slot_index;
+    superblock
+}
+
+#[test]
+fn the_geometry_comes_from_the_parity_member_not_from_the_slice_order() {
+    // `BlockGeometry::of` ist der Weg, den die Engine nimmt: Layout und
+    // Superbloecke rein, Blockzahl raus. Sie muss vom ParityP-Member kommen —
+    // er ist nach Regel 6 aus Abschnitt 2.1 der laengste. Die Members stehen
+    // hier verwuerfelt, und ParityP ist weder der erste noch der laengste
+    // Eintrag im Vektor.
+    let members = vec![
+        array_member(Role::Data, 2, 5, 0x12),
+        array_member(Role::ParityQ, 0, 12, 0x51),
+        array_member(Role::Data, 0, 3, 0x10),
+        array_member(Role::ParityP, 0, 12, 0x50),
+        array_member(Role::Data, 3, 12, 0x13),
+        array_member(Role::Data, 1, 1, 0x11),
+    ];
+    let layout = assemble(&members).expect("Array muss zusammengehen");
+    assert_ne!(layout.parity_p_position(), 0, "ParityP steht nicht vorn");
+
+    let geometry = BlockGeometry::of(&layout, &members).unwrap();
+    assert_eq!(geometry.block_size_log2(), LOG2);
+    assert_eq!(geometry.block_size(), BLOCK);
+    assert_eq!(geometry.block_count(), 12, "Bloecke des ParityP-Members");
+
+    // Und damit stimmt auch die Grenze, ab der ein Write ins Leere zeigt.
+    assert_eq!(geometry.blocks_touched(11 * BLOCK, BLOCK).unwrap(), 11..12);
+    assert!(geometry.blocks_touched(12 * BLOCK, 1).is_err());
+}
+
+#[test]
+fn the_geometry_needs_the_members_the_layout_was_built_from() {
+    // Das Layout haelt Positionen, keine Superbloecke. Wer eine kuerzere Liste
+    // nachreicht, bekommt einen Fehler und keinen Index ins Nichts.
+    let members = vec![
+        array_member(Role::Data, 0, 4, 0x10),
+        array_member(Role::Data, 1, 4, 0x11),
+        array_member(Role::Data, 2, 4, 0x12),
+        array_member(Role::Data, 3, 4, 0x13),
+        array_member(Role::ParityP, 0, 4, 0x50),
+    ];
+    let layout = assemble(&members).unwrap();
+    assert!(BlockGeometry::of(&layout, &members[..2]).is_err());
+}
+
+#[test]
+fn the_block_of_an_offset_is_the_offset_divided_by_the_block_size() {
+    let geometry = geometry(16);
+    assert_eq!(geometry.block_of(0), 0);
+    assert_eq!(geometry.block_of(BLOCK - 1), 0);
+    assert_eq!(geometry.block_of(BLOCK), 1);
+    assert_eq!(geometry.block_of(7 * BLOCK + 12), 7);
 }

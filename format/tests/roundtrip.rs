@@ -731,3 +731,36 @@ fn a_parity_member_may_rebuild() {
         MemberState::Rebuilding
     );
 }
+
+#[test]
+fn the_parity_roles_are_exactly_parity_p_and_parity_q() {
+    // `is_parity` entscheidet spaeter, welche Members die Redundanz tragen.
+    // Ein Log-Member gehoert nicht dazu — seine Region ist von keiner Paritaet
+    // gedeckt (Abschnitt 4.2).
+    assert!(Role::ParityP.is_parity());
+    assert!(Role::ParityQ.is_parity());
+    assert!(!Role::Data.is_parity());
+    assert!(!Role::Log.is_parity());
+}
+
+#[test]
+fn the_block_count_follows_from_the_payload_size() {
+    // Wird beim Rebuild und bei der Paritaetsrechnung gebraucht, war aber
+    // bisher nirgends gegen einen erwarteten Wert geprueft.
+    let mut superblock = sample_superblock();
+    superblock.parity_block_size_log2 = 16;
+    superblock.payload_size = 512 * 1024 * 1024;
+    assert_eq!(superblock.parity_block_size(), 65_536);
+    assert_eq!(superblock.parity_block_count(), 8192);
+
+    superblock.parity_block_size_log2 = 12;
+    superblock.payload_size = 12 * 4096;
+    assert_eq!(superblock.parity_block_count(), 12);
+
+    // Eine Log-Region ist nicht am Parity-Block ausgerichtet; die Rechnung
+    // rundet dann ab, und genau das ist gemeint.
+    superblock.role = Role::Log;
+    superblock.payload_size = 3 * 4096;
+    superblock.parity_block_size_log2 = 16;
+    assert_eq!(superblock.parity_block_count(), 0);
+}

@@ -17,7 +17,7 @@ darauf ab, wovon du nur eine Kopie hast.
 
 **Ohne jede Hardware.** Der grösste Teil des Projekts ist reine Rechnung und
 läuft auf jedem Rechner: `format/` beschreibt Bytes, `parity/` rechnet, `engine/`
-plant, `integration/` spielt beides gegeneinander durch. Zusammen 184 Tests und
+plant, `integration/` spielt beides gegeneinander durch. Zusammen 191 Tests und
 sechs Fuzz-Targets, alle ohne Platte.
 
 Das ist Absicht. Ein Speicherprojekt, an dem man nur mit sechs Festplatten im

@@ -32,7 +32,7 @@ Vier Crates sind fertig und brauchen kein Gerät:
 | `engine/` | Geometrie, dreckige Blöcke, Rebuild-Plan, Schreibpfad — reine Rechnung |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild |
 
-184 Tests, sechs Fuzz-Targets, CI grün — darunter ein Job, der die MSRV 1.75
+191 Tests, sechs Fuzz-Targets, CI grün — darunter ein Job, der die MSRV 1.75
 hält, und ein Wochenlauf, der jedes Fuzz-Target 30 Minuten mit aufgehobenem
 Korpus fährt.
 
