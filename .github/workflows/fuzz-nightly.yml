@@ -54,7 +54,7 @@ jobs:
       # dafuer, dass ein Lauf den Korpus des vorigen erbt, auch wenn sich der
       # Schluessel geaendert hat.
       - name: Korpus laden
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: format/fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -68,7 +68,7 @@ jobs:
       # Ohne diesen Schritt muesste man den Absturz aus dem Log rekonstruieren.
       - name: Absturzeingabe sichern
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: format/fuzz/artifacts/
