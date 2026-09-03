@@ -43,8 +43,33 @@ pub enum EngineError {
     CheckpointBeforeParity {
         stage: crate::write_path::BatchStage,
     },
+    /// Der Bereich liegt jenseits des Geraeteendes.
+    BeyondDevice { offset: u64, len: u64, size: u64 },
+    /// Schreibversuch auf einen nur lesend geoeffneten Member.
+    NotWritable,
+    /// Fehler vom Betriebssystem.
+    ///
+    /// Der `io::Error` selbst laesst sich nicht vergleichen, und die
+    /// Fehlervarianten dieses Crates werden in Tests gegen erwartete Werte
+    /// geprueft. Festgehalten wird deshalb, was sich vergleichen laesst und
+    /// zur Diagnose reicht: was versucht wurde, welche Art Fehler kam, und die
+    /// Fehlernummer des Betriebssystems.
+    Io {
+        what: &'static str,
+        kind: std::io::ErrorKind,
+        raw_os_error: Option<i32>,
+    },
     /// Eine Regel aus `docs/FORMAT.md` wurde verletzt.
     Format(FormatError),
+}
+
+/// Verpackt einen `io::Error` mit der Angabe, was gerade versucht wurde.
+pub(crate) fn io_error(what: &'static str) -> impl FnOnce(std::io::Error) -> EngineError {
+    move |error| EngineError::Io {
+        what,
+        kind: error.kind(),
+        raw_os_error: error.raw_os_error(),
+    }
 }
 
 impl From<FormatError> for EngineError {
@@ -84,6 +109,20 @@ impl fmt::Display for EngineError {
                 f,
                 "Checkpoint bei Stufe {stage:?}, die Paritaet ist noch nicht durable"
             ),
+            Self::BeyondDevice { offset, len, size } => write!(
+                f,
+                "Bereich {offset}..{} liegt jenseits des Geraetes ({size} Bytes)",
+                offset.saturating_add(*len)
+            ),
+            Self::NotWritable => write!(f, "Member ist nur lesend geoeffnet"),
+            Self::Io {
+                what,
+                kind,
+                raw_os_error,
+            } => match raw_os_error {
+                Some(code) => write!(f, "{what}: {kind:?} (errno {code})"),
+                None => write!(f, "{what}: {kind:?}"),
+            },
             Self::Format(error) => write!(f, "{error}"),
         }
     }

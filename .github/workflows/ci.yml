@@ -40,6 +40,46 @@ jobs:
       - name: cargo fmt --check (fuzz)
         run: cargo fmt --all --check --manifest-path format/fuzz/Cargo.toml
 
+  block-devices:
+    # Die `#[ignore]`-Tests aus `engine/tests/loop_device.rs`. Sie brauchen
+    # Linux und Root und laufen deshalb nicht im normalen Testlauf mit — ohne
+    # diesen Job wuerden sie nie ausgefuehrt und waeren nach der dritten
+    # Aenderung stillschweigend kaputt.
+    name: Blockgeraete (Loop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Gebaut wird als normaler Nutzer, damit der Cache derselbe bleibt;
+      # nur das Ausfuehren braucht Root. `--no-run` gibt den Pfad des
+      # Testbinaers aus, das danach unter `sudo` startet.
+      - name: Testbinary bauen
+        run: cargo test -p ferrite-engine --test loop_device --no-run
+
+      - name: Voraussetzungen melden
+        run: |
+          echo "Kernel: $(uname -r)"
+          losetup --version
+          losetup -a
+
+      # `-E` erhaelt die Umgebung, sonst findet `sudo` weder Cargo noch die
+      # Bibliothekspfade des Builds.
+      - name: Loop-Geraete-Tests
+        run: sudo -E $(cargo test -p ferrite-engine --test loop_device --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*loop_device[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
+
+      # Ein abgebrochener Test kann ein Loop-Geraet zurueckgelassen haben. Auf
+      # einem Runner ist das folgenlos, aber es soll im Log stehen.
+      - name: Reste melden
+        if: always()
+        run: losetup -a
+
   msrv:
     # `rust-version = "1.75"` steht in jeder Cargo.toml. Ohne diesen Job ist das
     # eine Behauptung: Der Test-Job baut mit `stable` und wuerde nicht merken,

@@ -109,13 +109,26 @@ Das erste Mal, dass Ferrite eine echte Platte anfasst. Nur das, nichts weiter:
 - Ein Array anlegen: Superblöcke für Data-, Parity- und Log-Member schreiben,
   danach über `assemble` wieder einlesen und vergleichen
 
-Der I/O-Pfad gehört in `engine/`, aber **hinter `#[cfg(target_os = "linux")]`**.
-Der Rechenkern darunter bleibt plattformunabhängig, damit `cargo test` überall
-läuft. Diese Trennung ist Absicht und der Grund, warum Meilenstein 1 ohne
-Hardware fertig wurde.
+Der I/O-Pfad gehört in `engine/`. Der Rechenkern darunter bleibt
+plattformunabhängig, damit `cargo test` überall läuft. Diese Trennung ist
+Absicht und der Grund, warum Meilenstein 1 ohne Hardware fertig wurde.
 
 Offsets sind 4096-aligned, `O_DIRECT` ist damit möglich. Ob du es nimmst,
 entscheidest du — aber begründe es im Code, nicht im Commit.
+
+> **Erledigt** in `engine/src/device.rs` und `engine/src/array.rs`.
+>
+> Abweichung vom ursprünglichen Plan, der `#[cfg(target_os = "linux")]` um den
+> ganzen I/O-Pfad vorsah: Der Grund für diese Grenze war, dass `cargo test`
+> überall laufen soll. Das ist auch ohne sie erfüllt — positioniertes Lesen und
+> Schreiben gibt es in `std` auf beiden Plattformen, und eine Datei verhält sich
+> für diesen Code wie ein Blockgerät. Die Grenze wandert damit dorthin, wo sie
+> hingehört: an das ublk-Target aus Aufgabe 3.
+>
+> Was nur ein echtes Blockgerät zeigt — Grösse über `seek` statt über Metadaten,
+> `sync_data` auf ein Gerät statt auf eine Datei — steht in
+> `engine/tests/loop_device.rs`, ist `#[ignore]`, braucht Linux und Root und
+> läuft im CI-Job „Blockgeräte (Loop)".
 
 ### 2 — Flush-Test, Abschnitt 5.3
 
