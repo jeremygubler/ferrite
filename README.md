@@ -94,7 +94,7 @@ von Anfang an mitläuft.
 |---|---|
 | `docs/FORMAT.md` | **Version 1.0 — eingefroren** |
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 100 Tests grün |
-| `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 26 Tests grün |
+| `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 31 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
 | `engine/` | Planung von Schreibpfad und Rebuild, plattformunabhängig — 44 Tests grün. ublk-Target offen, braucht Linux |
 | `broker/` | offen |
@@ -116,6 +116,15 @@ cd format && cargo +nightly fuzz run log_ring_replay -- -max_total_time=300
 
 Jeder Fund wird zuerst als Regressionstest unter `format/tests/`
 festgehalten und dann behoben — nicht umgekehrt.
+
+Der Durchsatz der Paritätsrechnung lässt sich messen, ohne eine Platte zu
+haben. Ein Kern, 64-KiB-Blöcke, 32 Data-Slots: rund 24 GB/s für P und 12 GB/s
+für Q. Damit ist die Rechnung für realistische Arrays kein Engpass — der
+Nachweis dafür gehört ins Repo, nicht in eine Behauptung:
+
+```
+cargo bench -p ferrite-parity
+```
 
 ## Mitarbeit
 

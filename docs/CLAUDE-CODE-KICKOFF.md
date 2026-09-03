@@ -32,9 +32,13 @@ Vier Crates sind fertig und brauchen kein Gerät:
 | `engine/` | Geometrie, dreckige Blöcke, Rebuild-Plan, Schreibpfad — reine Rechnung |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild |
 
-179 Tests, sechs Fuzz-Targets, CI grün. **Was `engine/` schon kann, baust du
-nicht neu.** Sieh dir vorher an: `BlockGeometry`, `dirty_blocks`,
-`RebuildPlan`, `WriteBatch`, `required_parity_update`, `data_is_valid_at`.
+184 Tests, sechs Fuzz-Targets, CI grün — darunter ein Job, der die MSRV 1.75
+hält, und ein Wochenlauf, der jedes Fuzz-Target 30 Minuten mit aufgehobenem
+Korpus fährt.
+
+**Was `engine/` schon kann, baust du nicht neu.** Sieh dir vorher an:
+`BlockGeometry`, `dirty_blocks`, `RebuildPlan`, `WriteBatch`,
+`required_parity_update`, `data_is_valid_at`.
 
 ## Deine Aufgaben, in dieser Reihenfolge
 
@@ -143,8 +147,11 @@ Keine Formatänderung. Fällt dir eine Lücke auf, melde sie und beschreibe, wel
 Feature-Bit sie bräuchte. Ab 1.0 ist der reservierte Bereich der einzige Weg,
 und sein Nullwert muss das bisherige Verhalten bedeuten.
 
-Kein SIMD in `parity/`. Erst messen, dann optimieren, und mit Benchmark davor
-und danach in einem eigenen Commit.
+Kein SIMD in `parity/`. Gemessen ist es bereits — `cargo bench -p
+ferrite-parity` liefert auf einem Kern rund 24 GB/s für P und 12 GB/s für Q,
+nach dem Horner-Umbau und den Konstantentabellen. Die Paritätsrechnung ist
+damit für realistische Arrays kein Engpass. Wenn die Engine etwas anderes
+zeigt, bring die Messung mit; ohne sie bleibt es dabei.
 
 ## Abschluss
 
