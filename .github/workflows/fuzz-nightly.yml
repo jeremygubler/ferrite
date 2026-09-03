@@ -1,0 +1,75 @@
+name: Fuzz (lang)
+
+# Die Rauchprobe in `ci.yml` laeuft 60 Sekunden pro Target und faengt das, was
+# eine Aenderung sofort kaputt macht. Sie findet nicht, was tief liegt.
+#
+# Dieser Lauf nimmt sich 30 Minuten pro Target und hebt den Korpus zwischen den
+# Durchgaengen auf: Jede Woche startet der Fuzzer dort, wo er beim letzten Mal
+# war, statt wieder bei einem leeren Puffer. Der Ertrag waechst damit ueber die
+# Zeit — das ist der ganze Sinn eines Korpus.
+on:
+  schedule:
+    # Sonntag nachts, wenn niemand auf Runner wartet.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # Ein Fund in einem Target soll die anderen nicht abwuergen.
+      fail-fast: false
+      matrix:
+        target:
+          - superblock_decode
+          - log_header_decode
+          - superblock_roundtrip
+          - chain_replay
+          - log_ring_replay
+          - assemble_array
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            format/fuzz
+
+      - name: cargo-fuzz installieren
+        run: cargo install cargo-fuzz --locked
+
+      # Der Korpus ist der eigentliche Wert dieses Jobs. `restore-keys` sorgt
+      # dafuer, dass ein Lauf den Korpus des vorigen erbt, auch wenn sich der
+      # Schluessel geaendert hat.
+      - name: Korpus laden
+        uses: actions/cache@v4
+        with:
+          path: format/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: ${{ matrix.target }}
+        working-directory: format
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=1800 -print_final_stats=1
+
+      # Ohne diesen Schritt muesste man den Absturz aus dem Log rekonstruieren.
+      - name: Absturzeingabe sichern
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: format/fuzz/artifacts/
+          if-no-files-found: ignore

@@ -1,0 +1,16 @@
+[package]
+name = "ferrite-integration"
+description = "In-Memory-Generalprobe: format und parity zusammen, ohne Blockgeraet."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Dieses Crate existiert, damit `format` und `parity` einander nicht kennen
+# muessen. Beide bleiben dependency-frei; die Naht zwischen ihnen wird hier
+# geprueft, nicht in einem von beiden.
+[dependencies]
+ferrite-format = { path = "../format" }
+ferrite-parity = { path = "../parity" }
+ferrite-engine = { path = "../engine" }

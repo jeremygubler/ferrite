@@ -1,0 +1,13 @@
+[package]
+name = "ferrite-parity"
+description = "Reed-Solomon P+Q over GF(2^8) for Ferrite. Pure computation, no I/O, no dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Absichtlich leer, aus demselben Grund wie bei `format`: Dieses Crate rechnet
+# nur. Kein I/O, keine Konfiguration, keine Uhrzeit, kein Zufall aus der
+# Umgebung — Zufall und Zeit kommen als Parameter herein. Damit laesst sich die
+# Rekonstruktion vollstaendig pruefen, ohne eine Platte anzufassen.
+[dependencies]

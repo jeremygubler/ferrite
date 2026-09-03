@@ -1,0 +1,5 @@
+# Im Repository steht ueberall LF, unabhaengig davon, auf welchem System
+# gearbeitet wird. Ohne diese Zeile entscheidet die lokale `core.autocrlf`, und
+# der naechste Rechner mit einer anderen Einstellung produziert einen Diff ueber
+# jede Zeile jeder Datei.
+* text=auto eol=lf

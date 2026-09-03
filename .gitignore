@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+/format/fuzz/target
+/format/fuzz/corpus
+/format/fuzz/artifacts

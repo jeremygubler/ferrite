@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test, Clippy, Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Zuerst das Format, dann Clippy, dann die Tests: Wer die Reihenfolge
+      # umdreht, wartet auf einen Testlauf, um dann an einer Leerzeile zu
+      # scheitern.
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-features
+
+      # `format/fuzz` ist ein eigener Workspace und wird von den Schritten
+      # darueber nicht erfasst. Gebaut wird es im Fuzz-Job; hier laeuft nur,
+      # was auch auf Stable geht.
+      - name: cargo fmt --check (fuzz)
+        run: cargo fmt --all --check --manifest-path format/fuzz/Cargo.toml
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Ein Fund in einem Target soll die anderen nicht abwuergen — sie
+      # koennten je einen eigenen haben.
+      fail-fast: false
+      matrix:
+        target:
+          - superblock_decode
+          - log_header_decode
+          - superblock_roundtrip
+          - chain_replay
+          - log_ring_replay
+          - assemble_array
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            format/fuzz
+
+      - name: cargo-fuzz installieren
+        run: cargo install cargo-fuzz --locked
+
+      # Kurzer Lauf pro Push. Das ist keine Fuzzing-Kampagne, sondern eine
+      # Rauchprobe: Sie faengt das, was eine Aenderung sofort kaputt macht.
+      # Die langen Laeufe passieren ausserhalb von CI und ihre Funde landen als
+      # Regressionstests in `format/tests/roundtrip.rs`.
+      - name: ${{ matrix.target }}
+        working-directory: format
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -print_final_stats=1
+
+      # Ohne diesen Schritt muesste man den Crash aus dem Log rekonstruieren.
+      - name: Absturzeingabe sichern
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: format/fuzz/artifacts/
+          if-no-files-found: ignore

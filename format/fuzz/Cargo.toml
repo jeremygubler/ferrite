@@ -1,0 +1,70 @@
+# Eigenes Workspace-Root: Das Fuzz-Crate haengt an libfuzzer-sys und damit an
+# einer Nightly-Toolchain. Es darf den dependency-freien Workspace darueber
+# nicht mit hineinziehen — `cargo test` im Wurzelverzeichnis soll weiterhin
+# ohne jede fremde Crate durchlaufen.
+[workspace]
+
+[package]
+name = "ferrite-format-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+
+[dependencies.ferrite-format]
+path = ".."
+
+# Debug-Assertions bleiben an: Ein Integer-Ueberlauf im Replay-Pfad ist ein
+# Fund und kein stiller Wrap.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "superblock_decode"
+path = "fuzz_targets/superblock_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_header_decode"
+path = "fuzz_targets/log_header_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "superblock_roundtrip"
+path = "fuzz_targets/superblock_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chain_replay"
+path = "fuzz_targets/chain_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_ring_replay"
+path = "fuzz_targets/log_ring_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assemble_array"
+path = "fuzz_targets/assemble_array.rs"
+test = false
+doc = false
+bench = false

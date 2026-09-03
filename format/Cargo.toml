@@ -1,0 +1,13 @@
+[package]
+name = "ferrite-format"
+description = "On-disk format types for Ferrite. Pure, no I/O, no dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Absichtlich leer. Dieses Crate beschreibt ausschliesslich Bytes auf der Platte
+# und darf deshalb nichts enthalten, was I/O macht, alloziert oder von einer
+# externen Version abhaengt. Jede Dependency hier waere spaeter ein Grund, das
+# Format nicht mehr aendern zu koennen.
+[dependencies]

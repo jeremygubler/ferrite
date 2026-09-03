@@ -1,0 +1,13 @@
+[package]
+name = "ferrite-engine"
+description = "Planung des Schreib- und Rebuild-Pfads. Reine Rechnung, die I/O-Schale kommt separat."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Noch dependency-frei ausser dem Format. Das ublk-Target, das dieses Crate
+# spaeter benutzt, ist Linux-only und kommt hinter `#[cfg(target_os = "linux")]`
+# dazu — der Kern hier bleibt plattformunabhaengig und damit ueberall testbar.
+[dependencies]
+ferrite-format = { path = "../format" }
