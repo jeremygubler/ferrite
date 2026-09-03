@@ -40,6 +40,32 @@ jobs:
       - name: cargo fmt --check (fuzz)
         run: cargo fmt --all --check --manifest-path format/fuzz/Cargo.toml
 
+  msrv:
+    # `rust-version = "1.75"` steht in jeder Cargo.toml. Ohne diesen Job ist das
+    # eine Behauptung: Der Test-Job baut mit `stable` und wuerde nicht merken,
+    # wenn jemand etwas Neueres benutzt.
+    #
+    # Gebaut, nicht getestet. Die Tests brauchen dieselbe Sprache wie das Crate,
+    # aber wer die MSRV halten will, interessiert sich dafuer, ob es
+    # uebersetzt — und ein Testlauf kostet hier nur Zeit.
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.75 --profile minimal
+          rustup default 1.75
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: cargo check
+        run: cargo check --all-targets --all-features
+
   fuzz:
     name: Fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
