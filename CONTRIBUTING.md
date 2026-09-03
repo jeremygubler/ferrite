@@ -24,9 +24,12 @@ Das ist Absicht. Ein Speicherprojekt, an dem man nur mit sechs Festplatten im
 Keller mitarbeiten kann, bekommt keine Mitarbeiter.
 
 **Mit Linux.** Meilenstein 2 braucht Kernel ≥ 6.0 mit geladenem `ublk_drv`, das
-Crash-Harness aus Meilenstein 3 zusätzlich `dm-flakey`/`dm-dust` und Root. Der
-Auftrag dafür steht ausformuliert in
-[`docs/CLAUDE-CODE-KICKOFF.md`](docs/CLAUDE-CODE-KICKOFF.md). Eine VM reicht.
+Crash-Harness aus Meilenstein 3 zusätzlich `dm-flakey` und Root. Der Auftrag
+dafür steht ausformuliert in
+[`docs/CLAUDE-CODE-KICKOFF.md`](docs/CLAUDE-CODE-KICKOFF.md). Eine VM reicht —
+und für vieles sogar ein CI-Runner: `ublk_drv` liegt dort in
+`linux-modules-extra-$(uname -r)`, `dm-flakey` ist ohnehin geladen. Details im
+Kickoff.
 
 **Am wertvollsten wäre eine zweite Implementierung.** `docs/FORMAT.md` ist
 normativ und soll vollständig genug sein, um Ferrite unabhängig nachzubauen. Wer

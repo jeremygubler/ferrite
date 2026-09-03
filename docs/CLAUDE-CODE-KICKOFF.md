@@ -7,6 +7,30 @@ nur den Auftrag für die nächste Sitzung. Alles ab `---` kopieren.
 > für das Anlegen der Geräte. Auf einer Maschine ohne Kernelzugriff ist der
 > Auftrag nicht ausführbar — das ist kein Grund für eine Attrappe, sondern ein
 > Grund, die Maschine zu wechseln.
+>
+> **Es muss aber keine eigene Maschine sein.** Auf den GitHub-Actions-Runnern
+> (`ubuntu-latest`, Kernel 6.17-azure) steht alles Nötige zur Verfügung —
+> nachgeprüft, nicht vermutet:
+>
+> ```
+> sudo apt-get install -y linux-modules-extra-$(uname -r)
+> sudo modprobe ublk_drv        # danach existiert /dev/ublk-control
+> sudo modprobe dm_flakey       # ohne Nachinstallation bereits da
+> ```
+>
+> `sudo` ohne Passwort, Loop-Geräte funktionieren, `dmsetup` kennt `flakey` und
+> `error`. **Nicht** verfügbar ist `dm_dust`, auch nicht nachinstallierbar; die
+> stille Korruption aus Meilenstein 3 lässt sich stattdessen über
+> `dm-flakey`s `corrupt_bio_byte` erzeugen, Lesefehler über `dm-error`.
+>
+> Geprüft ist damit, dass das Modul lädt und das Kontrollgerät existiert —
+> **nicht**, dass sich ein ublk-Gerät tatsächlich anlegen und betreiben lässt.
+> Das ist deine erste Aufgabe.
+>
+> Zwei Dinge kann CI nicht: interaktives Entwickeln, und den Flush-Test aus
+> Abschnitt 5.3 ehrlich beantworten. Ein Loop-Gerät auf dem Dateisystem eines
+> Runners misst das Dateisystem, nicht die Platte — genau der Fall, vor dem 5.3
+> warnt.
 
 ---
 
