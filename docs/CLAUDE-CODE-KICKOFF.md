@@ -142,6 +142,52 @@ Sag im Bericht ausdrücklich, wie du den Test gebaut hast und was er auf deiner
 Hardware ergibt. Ein Flush-Test, der immer „ehrlich" sagt, ist schlimmer als
 keiner.
 
+> **Erledigt** in `engine/src/flush.rs`.
+>
+> **Die tragende Einsicht: Der Test ist asymmetrisch.** Ob ein `FLUSH` ehrlich
+> beantwortet wird, entscheidet sich erst bei einem Stromausfall — aus dem
+> Userspace eines laufenden Systems ist das nicht nachweisbar. Der Test kann
+> Ehrlichkeit also **widerlegen, aber kaum belegen**. Entsprechend ist
+> `Undecidable` die Vorgabe und nicht der Ausnahmefall, und Abschnitt 5.3 macht
+> beides ohnehin gleich: Write-Through.
+>
+> Die Entscheidung fällt die reine Funktion `judge(&DeviceFacts)`. Das Sammeln
+> der Fakten steht getrennt davon, weil es plattformabhängig ist. Damit lässt
+> sich jede Kombination prüfen — der Test `exactly_one_combination_of_facts_yields_honest`
+> geht alle 216 durch und hält fest, dass genau ein Satz Fakten zu „ehrlich"
+> führt und alles andere zu Write-Through.
+>
+> **Verworfen: Zeitmessung.** Ein `FLUSH`, das nach 4 MiB in 20 µs zurückkommt,
+> ist auf einer drehenden Platte unmöglich und auf einer NVMe mit
+> Power-Loss-Protection normal. Die Messung trennt schnelle Geräte von langsamen,
+> nicht Ehrlichkeit von Lüge.
+>
+> **Verworfen: erfolgreiches `sync_data` als Beleg.** Genau das ist die Lüge,
+> um die es in 5.3 geht.
+>
+> **Was der Test auf dieser Maschine sagt** (WSL2, Kernel 6.18.40.1):
+>
+> ```
+> Gerät /dev/sda   Schreibcache WriteThrough   virtualisiert   → Undecidable
+> Gerät /dev/sdb   Schreibcache WriteBack      virtualisiert   → Undecidable
+> ```
+>
+> Der erste Fall ist der Grund, warum die Virtualisierungsprüfung nötig ist:
+> **`/dev/sda` meldet „write through", ist aber eine virtuelle Platte.** Wer nur
+> auf `/sys/.../queue/write_cache` hört, bekommt hier „ehrlich" für ein Gerät,
+> das genau die Lüge erzählt, gegen die Abschnitt 5.3 geschrieben ist. Der Test
+> `no_real_block_device_on_a_virtual_machine_is_honest` läuft über alle
+> Blockgeräte der Maschine und hält das fest — 27 geprüft, keines ehrlich.
+>
+> Nachzuvollziehen mit `cargo run -p ferrite-engine --example flush-report --
+> /dev/sda`. Der Bericht gibt die Fakten aus, nicht nur das Ergebnis.
+>
+> **Offen und ehrlich benannt:** Auf dieser Maschine kann der Test nie „ehrlich"
+> sagen, weil sie virtualisiert ist. Das ist die richtige Antwort und keine
+> Lücke — aber es heisst auch, dass der positive Zweig hier nur durch die
+> Faktentabelle abgedeckt ist und nicht durch eine Messung. Den harten Nachweis
+> liefert erst das Crash-Harness aus Meilenstein 3.
+
 ### 3 — ublk-Target pro Data-Member
 
 Ein ublk-Gerät je Data-Member, das seine Payload-Region 1:1 abbildet. btrfs

@@ -8,11 +8,12 @@ Bit-Rot, atomare Updates. Läuft bare metal wie virtualisiert.
 
 > **Status: früh.** Das *On-Disk-Format* steht bei Version 1.0 und ist
 > eingefroren. **Ferrite selbst ist es nicht** — die beiden Versionen haben
-> nichts miteinander zu tun. Es gibt die Metadatenschicht und die
-> Paritätsrechnung, aber kein Blockgerät: Ferrite fasst bislang keine Platte an
-> und kann keine Daten speichern. Lege nichts darauf ab, wovon du nur eine
-> Kopie hast — auch später nicht, bevor das Crash-Harness aus Meilenstein 3
-> grün in CI läuft.
+> nichts miteinander zu tun. Es gibt die Metadatenschicht, die Paritätsrechnung
+> und seit Meilenstein 2 den Gerätezugriff: Ferrite kann ein Array über echte
+> Platten anlegen und wieder öffnen. **Speichern kann es noch nichts** — es gibt
+> kein Blockgerät, keinen Schreibpfad, keinen Rebuild auf Platte. Lege nichts
+> darauf ab, wovon du nur eine Kopie hast — auch später nicht, bevor das
+> Crash-Harness aus Meilenstein 3 grün in CI läuft.
 
 ## Warum
 
@@ -96,7 +97,7 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array anlegen und öffnen — 73 Tests grün, dazu 5 auf echten Blockgeräten. ublk-Target offen, braucht Linux |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array anlegen und öffnen, Flush-Test nach 5.3 — 90 Tests grün, dazu 8 auf echten Blockgeräten. ublk-Target offen, braucht Linux |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |

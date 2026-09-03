@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ferrite_engine::{
-    create_array, open_array, read_superblock, write_superblock, ArraySpec, MemberDevice,
-    MemberSpec,
+    check_flush, collect_facts, create_array, open_array, probe_write_path, read_superblock,
+    write_superblock, ArraySpec, DeviceKind, FlushVerdict, MemberDevice, MemberSpec, WriteMode,
 };
 use ferrite_format::superblock::{
     Role, Superblock, DEFAULT_PAYLOAD_OFFSET, SUPERBLOCK_BACKUP_FROM_END,
@@ -243,4 +243,92 @@ fn an_array_of_differently_sized_block_devices_opens_again() {
     assert_eq!(array.data_member(1).unwrap().payload_size, 9 * BLOCK);
     assert_eq!(array.data_member(2).unwrap().payload_size, 6 * BLOCK);
     assert_eq!(array.parity_p().payload_size, 9 * BLOCK);
+}
+
+// --- Flush-Test, Abschnitt 5.3 -------------------------------------------
+
+#[test]
+#[ignore = "braucht Linux und Root"]
+fn a_loop_device_is_recognised_as_one() {
+    // Die Erkennung ist der Grund, warum der Flush-Test Loop-Geraete ablehnt.
+    // Faellt sie aus, haelt er sie fuer echte Platten und misst das
+    // Dateisystem darunter.
+    let Some(loop_device) = LoopDevice::create("erkennung", DEVICE_SIZE) else {
+        return;
+    };
+    let facts = collect_facts(loop_device.path());
+    assert_eq!(facts.kind, DeviceKind::LoopDevice);
+
+    let device = MemberDevice::open(loop_device.path()).unwrap();
+    let check = check_flush(&device, None);
+    assert_eq!(check.verdict, FlushVerdict::Undecidable);
+    assert_eq!(check.write_mode(), WriteMode::WriteThrough);
+}
+
+#[test]
+#[ignore = "braucht Linux und Root"]
+fn no_real_block_device_on_a_virtual_machine_is_honest() {
+    // Der Fall aus Abschnitt 5.3, an echten Geraeten dieser Maschine.
+    //
+    // In WSL meldet `/sys/class/block/sda/queue/write_cache` „write through".
+    // Wer nur darauf hoert, bekommt „ehrlich" fuer eine virtuelle Platte —
+    // genau die Luege, gegen die der Abschnitt geschrieben ist. Dieser Test
+    // laeuft ueber alles, was der Kernel als Blockgeraet fuehrt, und haelt
+    // fest: Solange das System virtualisiert ist, kommt nirgends `Honest`
+    // heraus.
+    if !is_root() {
+        eprintln!("uebersprungen: braucht Root");
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir("/sys/class/block") else {
+        eprintln!("uebersprungen: /sys/class/block nicht lesbar");
+        return;
+    };
+
+    let mut seen = 0;
+    for entry in entries.flatten() {
+        let path = PathBuf::from("/dev").join(entry.file_name());
+        let Ok(device) = MemberDevice::open_read_only(&path) else {
+            continue;
+        };
+        let facts = collect_facts(&path);
+        if facts.virtualized != Some(true) {
+            continue;
+        }
+        seen += 1;
+
+        let check = check_flush(&device, None);
+        assert_ne!(
+            check.verdict,
+            FlushVerdict::Honest,
+            "{}: {:?} sagt {:?}",
+            path.display(),
+            facts.write_cache,
+            check.verdict
+        );
+        assert_eq!(check.write_mode(), WriteMode::WriteThrough);
+    }
+
+    // Ohne diese Zeile waere nicht zu sehen, ob die Schleife ueberhaupt lief.
+    // Kein Fehlschlag: Auf blankem Blech gibt es kein virtualisiertes Geraet,
+    // und dort darf `Honest` durchaus herauskommen — das ist der Sinn.
+    if seen == 0 {
+        eprintln!("kein virtualisiertes Blockgeraet gefunden, nichts zu pruefen");
+    } else {
+        eprintln!("{seen} virtualisierte Blockgeraete geprueft, keines ehrlich");
+    }
+}
+
+#[test]
+#[ignore = "braucht Linux und Root"]
+fn the_write_probe_runs_against_a_real_block_device() {
+    let Some(loop_device) = LoopDevice::create("schreibprobe", DEVICE_SIZE) else {
+        return;
+    };
+    let device = MemberDevice::open(loop_device.path()).unwrap();
+    assert!(probe_write_path(&device, DEFAULT_PAYLOAD_OFFSET).unwrap());
+
+    // Und hebt das Ergebnis trotzdem nicht an — es ist ein Loop-Geraet.
+    let check = check_flush(&device, Some(true));
+    assert_eq!(check.verdict, FlushVerdict::Undecidable);
 }

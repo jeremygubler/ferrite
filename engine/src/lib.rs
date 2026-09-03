@@ -35,6 +35,7 @@
 pub mod array;
 pub mod device;
 pub mod error;
+pub mod flush;
 pub mod geometry;
 pub mod rebuild;
 pub mod write_path;
@@ -42,6 +43,10 @@ pub mod write_path;
 pub use array::{create_array, max_payload_size, open_array, ArraySpec, MemberSpec, OpenArray};
 pub use device::{read_superblock, write_superblock, MemberDevice};
 pub use error::{EngineError, Result};
+pub use flush::{
+    check_flush, collect_facts, judge, probe_write_path, DeviceFacts, DeviceKind, FlushCheck,
+    FlushVerdict, WriteCache, WriteMode,
+};
 pub use geometry::{dirty_blocks, total_blocks, BlockGeometry, WriteTarget};
 pub use rebuild::{data_is_valid_at, RebuildPlan};
 pub use write_path::{
