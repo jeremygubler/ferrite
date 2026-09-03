@@ -98,6 +98,22 @@ pub fn mul(a: u8, b: u8) -> u8 {
     EXP[LOG[a as usize] as usize + LOG[b as usize] as usize]
 }
 
+/// Multiplikationstabelle fuer einen festen Faktor: `table[x] == mul(factor, x)`.
+///
+/// Lohnt sich, sobald derselbe Faktor auf viele Bytes trifft. [`mul`] kostet je
+/// Byte eine Verzweigung, zwei Tabellenzugriffe und eine Addition; hier bleibt
+/// ein einziger Load. Die Tabelle ist 256 Bytes gross und damit im L1.
+///
+/// Sie zu bauen kostet 256 Multiplikationen — gegenueber einem Parity-Block von
+/// mindestens 4 KiB fuellt das die Kosten nicht aus.
+pub fn mul_table(factor: u8) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    for (value, entry) in table.iter_mut().enumerate() {
+        *entry = mul(factor, value as u8);
+    }
+    table
+}
+
 /// `g^exponent`.
 ///
 /// Der Exponent ist der `slot_index`, nicht die Position im uebergebenen
@@ -180,6 +196,23 @@ mod tests {
         let expected: Vec<u8> = buffer.iter().map(|&byte| double(byte)).collect();
         double_in_place(&mut buffer);
         assert_eq!(buffer, expected);
+    }
+
+    #[test]
+    fn a_multiplication_table_matches_the_multiplication() {
+        // Die Tabelle ersetzt `mul` im Rekonstruktionspfad. Weicht sie fuer ein
+        // einziges Element ab, kommen dort falsche Bytes heraus, die aussehen
+        // wie Daten.
+        for factor in 0u8..=255 {
+            let table = mul_table(factor);
+            for value in 0u8..=255 {
+                assert_eq!(
+                    table[usize::from(value)],
+                    mul(factor, value),
+                    "factor={factor} value={value}"
+                );
+            }
+        }
     }
 
     #[test]

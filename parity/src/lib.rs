@@ -191,8 +191,9 @@ pub fn reconstruct_from_q(
     // g^target ist nie null, das Inverse existiert also immer. Zurueckgegeben
     // wird der Fehler trotzdem, statt ihn anzunehmen.
     let inverse = gf::inv(gf::g_pow(target)).ok_or(ParityError::DivisionByZero)?;
+    let scale = gf::mul_table(inverse);
     for byte in out.iter_mut() {
-        *byte = gf::mul(*byte, inverse);
+        *byte = scale[usize::from(*byte)];
     }
     Ok(())
 }
@@ -230,6 +231,15 @@ pub fn reconstruct_two_from_pq(
     let inverse =
         gf::inv(coefficient_first ^ coefficient_second).ok_or(ParityError::DivisionByZero)?;
 
+    // Statt `mul(B ^ mul(g^x, A), c)` je Byte einmal ausmultipliziert:
+    //
+    //     D_y = c·B ^ (c·g^x)·A
+    //
+    // Beide Faktoren sind ueber den ganzen Block konstant, also wird daraus je
+    // ein Load statt einer vollen Multiplikation.
+    let scale_q = gf::mul_table(inverse);
+    let scale_p = gf::mul_table(gf::mul(coefficient_first, inverse));
+
     let mut scratch_p = [0u8; SCRATCH_WIDTH];
     let mut scratch_q = [0u8; SCRATCH_WIDTH];
 
@@ -254,10 +264,8 @@ pub fn reconstruct_two_from_pq(
         xor_into(sum_q, &q[base..base + width]);
 
         for offset in 0..width {
-            let value_second = gf::mul(
-                sum_q[offset] ^ gf::mul(coefficient_first, sum_p[offset]),
-                inverse,
-            );
+            let value_second =
+                scale_q[usize::from(sum_q[offset])] ^ scale_p[usize::from(sum_p[offset])];
             let value_first = sum_p[offset] ^ value_second;
             // Der kuerzere der beiden Slots endet frueher; dahinter ist sein
             // Wert per Zero-Extension null und wird nicht geschrieben.
