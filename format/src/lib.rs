@@ -33,7 +33,9 @@ pub mod uuid;
 pub use assemble::{assemble, ArrayLayout};
 pub use crc32c::crc32c as checksum;
 pub use error::{FormatError, Result};
-pub use log::ring::{LogRing, LogWriter, Replay, ReplayRecord, ReplayStop};
+pub use log::ring::{
+    plan_append, LogRing, LogWriter, PaddingPlacement, Placement, Replay, ReplayRecord, ReplayStop,
+};
 pub use log::{ChainBreak, ChainValidator, ChainVerdict, LogRecordHeader, RecordType};
 pub use superblock::{AccessMode, MemberState, Role, Superblock};
 pub use uuid::Uuid;

@@ -67,8 +67,9 @@ Entwickler nie findet.
    sind gefuzzt, Golden Vectors sichern das Byte-Layout, und `integration/` hat
    das Format einmal vollständig durchgespielt — ohne Blockgerät. Ab hier darf
    Code Bytes auf eine echte Platte schreiben.
-2. **Paritäts-Engine.** Reed-Solomon P+Q ist fertig; offen sind ublk-Target,
-   Write-Log-Anbindung und Rebuild. **Braucht Linux** mit geladenem `ublk_drv`.
+2. **Paritäts-Engine.** Reed-Solomon P+Q, Gerätezugriff und das Write-Log auf
+   Platte sind fertig; offen sind ublk-Target, Schreibpfad und Rebuild.
+   **Braucht Linux** mit geladenem `ublk_drv`.
 3. **Crash-Harness.** `dm-flakey` und `dm-dust` für Lesefehler und stille
    Korruption, Power-Fail per `SIGKILL` an zufälligen Punkten im Schreibpfad,
    danach Replay und vollständige Paritätsverifikation. Ab hier in CI,
@@ -97,7 +98,7 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array anlegen und öffnen, Flush-Test nach 5.3 — 90 Tests grün, dazu 8 auf echten Blockgeräten. ublk-Target offen, braucht Linux |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte — 106 Tests grün, dazu 9 auf echten Blockgeräten. ublk-Target offen, braucht Linux |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |

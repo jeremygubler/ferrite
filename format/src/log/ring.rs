@@ -246,6 +246,78 @@ impl<'a> Iterator for Replay<'a> {
     }
 }
 
+/// Ein `Padding`, das vor einem Record noch geschrieben werden muss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaddingPlacement {
+    pub offset: usize,
+    pub header: LogRecordHeader,
+    /// Bytes, die das Padding belegt: sein Header plus der Rest der Region.
+    pub total: usize,
+}
+
+/// Wohin ein Record kommt und was vorher noch zu tun ist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    /// Nur gesetzt, wenn der Record nicht mehr vor das Ende passt.
+    pub padding: Option<PaddingPlacement>,
+    pub offset: usize,
+    /// Bytes, die der Record belegt, aufgerundet auf ganze Sektoren.
+    pub total: usize,
+    /// Kopf des Ringpuffers nach diesem Record.
+    pub next_head: usize,
+}
+
+/// Rechnet aus, wohin der naechste Record kommt — ohne ihn zu schreiben.
+///
+/// Die Platzierungsregel aus Abschnitt 5.1 steht damit an genau einer Stelle.
+/// [`LogWriter`] benutzt sie fuer eine Region im Speicher, die Engine fuer eine
+/// auf einer Platte, wo die ganze Region nicht in den Arbeitsspeicher passt.
+/// Zwei Umsetzungen derselben Regel waeren zwei Gelegenheiten, sie
+/// unterschiedlich falsch zu machen.
+pub fn plan_append(region_len: usize, head: usize, header: &LogRecordHeader) -> Result<Placement> {
+    check_region(region_len)?;
+    if head % LOG_SECTOR_SIZE != 0 || head >= region_len {
+        return Err(FormatError::InvalidField {
+            field: "head",
+            reason: "kein Sektoranfang innerhalb der Log-Region",
+        });
+    }
+
+    let total = header.on_disk_len();
+    if total > region_len {
+        return Err(FormatError::InvalidField {
+            field: "payload_len",
+            reason: "Record passt nicht in die Log-Region",
+        });
+    }
+
+    let mut padding = None;
+    let mut offset = head;
+    if total > region_len - head {
+        // Der Rest der Region ist immer mindestens ein Sektor gross, weil
+        // `head` ein Sektoranfang unterhalb der Regionsgroesse ist.
+        let to_end = region_len - head;
+        let skipped = (to_end - LOG_HEADER_SIZE) as u32;
+        padding = Some(PaddingPlacement {
+            offset: head,
+            header: LogRecordHeader::padding(header.seq, skipped),
+            total: to_end,
+        });
+        offset = 0;
+    }
+
+    let mut next_head = offset + total;
+    if next_head >= region_len {
+        next_head = 0;
+    }
+    Ok(Placement {
+        padding,
+        offset,
+        total,
+        next_head,
+    })
+}
+
 /// Schreibender Zugriff auf eine Log-Region.
 ///
 /// Kennt nur den Kopf des Ringpuffers. Wann ein Checkpoint faellig ist und was
@@ -295,31 +367,14 @@ impl<'a> LogWriter<'a> {
                 reason: "Laenge passt nicht zum Header",
             });
         }
-        let total = header.on_disk_len();
-        if total > self.region.len() {
-            return Err(FormatError::InvalidField {
-                field: "payload_len",
-                reason: "Record passt nicht in die Log-Region",
-            });
-        }
+        let plan = plan_append(self.region.len(), self.head, header)?;
 
-        if total > self.region.len() - self.head {
-            // Der Rest der Region ist immer mindestens ein Sektor gross, weil
-            // `head` ein Sektoranfang unterhalb der Regionsgroesse ist.
-            let to_end = self.region.len() - self.head;
-            let skipped = (to_end - LOG_HEADER_SIZE) as u32;
-            let padding = LogRecordHeader::padding(header.seq, skipped);
-            self.put(self.head, &padding.encode(), &[], to_end);
-            self.head = 0;
+        if let Some(padding) = &plan.padding {
+            self.put(padding.offset, &padding.header.encode(), &[], padding.total);
         }
-
-        let offset = self.head;
-        self.put(offset, &header.encode(), payload, total);
-        self.head = offset + total;
-        if self.head >= self.region.len() {
-            self.head = 0;
-        }
-        Ok(offset)
+        self.put(plan.offset, &header.encode(), payload, plan.total);
+        self.head = plan.next_head;
+        Ok(plan.offset)
     }
 
     /// Schreibt Header und Nutzdaten und nullt den Rest des letzten Sektors.

@@ -332,3 +332,45 @@ fn the_write_probe_runs_against_a_real_block_device() {
     let check = check_flush(&device, Some(true));
     assert_eq!(check.verdict, FlushVerdict::Undecidable);
 }
+
+// --- Write-Log, Abschnitt 5 ----------------------------------------------
+
+#[test]
+#[ignore = "braucht Linux und Root"]
+fn the_write_log_survives_a_reopen_on_a_real_block_device() {
+    // Derselbe Durchstich wie in `log_device.rs`, aber ueber die Blockschicht
+    // des Kernels: schreiben, Geraet schliessen, neu oeffnen, replayen.
+    use ferrite_engine::DeviceLog;
+    use ferrite_format::log::LOG_SECTOR_SIZE;
+
+    let Some(loop_device) = LoopDevice::create("log", DEVICE_SIZE) else {
+        return;
+    };
+    let mut superblock = sample(Role::Log, 0);
+    superblock.role = Role::Log;
+
+    {
+        let device = MemberDevice::open(loop_device.path()).unwrap();
+        write_superblock(&device, &superblock).unwrap();
+        let mut log = DeviceLog::initialize(&device, &superblock).unwrap();
+        for nth in 0..4u8 {
+            let payload: Vec<u8> = (0..200).map(|index| (index as u8) ^ nth).collect();
+            log.append_write(0, nth as u64 * 4096, &payload).unwrap();
+        }
+    }
+
+    let device = MemberDevice::open(loop_device.path()).unwrap();
+    let from_disk = read_superblock(&device).unwrap();
+    let (log, recovery) = DeviceLog::open(&device, &from_disk).unwrap();
+
+    assert_eq!(recovery.accepted, 4);
+    assert_eq!(log.next_seq(), 5);
+    assert_eq!(log.head(), 4 * LOG_SECTOR_SIZE);
+
+    let seqs: Vec<u64> = recovery
+        .records()
+        .unwrap()
+        .map(|record| record.header.seq)
+        .collect();
+    assert_eq!(seqs, vec![1, 2, 3, 4]);
+}

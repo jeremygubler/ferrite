@@ -37,6 +37,7 @@ pub mod device;
 pub mod error;
 pub mod flush;
 pub mod geometry;
+pub mod log_device;
 pub mod rebuild;
 pub mod write_path;
 
@@ -48,6 +49,7 @@ pub use flush::{
     FlushVerdict, WriteCache, WriteMode,
 };
 pub use geometry::{dirty_blocks, total_blocks, BlockGeometry, WriteTarget};
+pub use log_device::{DeviceLog, LogRecovery};
 pub use rebuild::{data_is_valid_at, RebuildPlan};
 pub use write_path::{
     required_parity_update, BatchOrigin, BatchStage, BlockSituation, ParityUpdate, SourceState,
