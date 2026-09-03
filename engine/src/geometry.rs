@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Rechnen in Parity-Blöcken, `docs/FORMAT.md` Abschnitt 2.
 //!
 //! Ferrite ist kein Striping-Layout: Parity-Block `i` deckt bei **jedem**

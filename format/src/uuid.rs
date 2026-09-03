@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 use core::fmt;
 
 /// 16 Byte Identifier, on-disk exakt so gespeichert wie im Speicher.

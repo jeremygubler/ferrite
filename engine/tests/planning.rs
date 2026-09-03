@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Tests der Planungslogik.
 //!
 //! Kein Geraet, kein Zufall. Geprueft wird, dass kein Parity-Block unter den

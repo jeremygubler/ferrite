@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Rekonstruktionstests gegen Abschnitt 2 von `docs/FORMAT.md`.
 //!
 //! Der Zufall laeuft ueber denselben festen LCG wie in

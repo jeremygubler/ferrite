@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! CRC-32C (Castagnoli), reflektiert, Polynom `0x82F63B78`.
 //!
 //! Bewusst als reine Software-Tabelle. Die SSE4.2-/CRC32-Instruktionen gehoeren

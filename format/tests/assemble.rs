@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Tests gegen Abschnitt 2.1 von `docs/FORMAT.md`.
 //!
 //! Zu jeder der sechs Assemble-Regeln gehoert hier ein Test, der ihre

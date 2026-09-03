@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Zusammensetzen eines Arrays, `docs/FORMAT.md` Abschnitt 2.1.
 //!
 //! Herein kommen die bereits dekodierten Superbloecke aller Members, heraus

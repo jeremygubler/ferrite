@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Golden Vectors: das eingefrorene Byte-Layout, von Hand festgeschrieben.
 //!
 //! Jeder andere Test in diesem Crate laeuft `encode` → `decode` durch denselben

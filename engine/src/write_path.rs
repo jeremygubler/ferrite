@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Der Schreibpfad als reine Zustandslogik, `docs/FORMAT.md` Abschnitt 5.
 //!
 //! Ein Write gilt als bestaetigt, sobald sein Record im Log durable ist. Was

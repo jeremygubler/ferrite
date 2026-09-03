@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! `assemble` gegen beliebige Member-Mengen, `docs/FORMAT.md` Abschnitt 2.1.
 //!
 //! Invariante: Was `assemble` durchlaesst, ist ein Array, aus dem sich

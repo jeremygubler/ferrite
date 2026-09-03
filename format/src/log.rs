@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Write-Log, `docs/FORMAT.md` Abschnitt 5.
 
 pub mod ring;

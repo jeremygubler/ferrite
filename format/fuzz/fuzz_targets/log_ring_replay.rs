@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Recovery ueber eine Log-Region aus beliebigen Bytes,
 //! `docs/FORMAT.md` Abschnitt 5.2.
 //!

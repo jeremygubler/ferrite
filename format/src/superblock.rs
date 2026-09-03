@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Superblock, `docs/FORMAT.md` Abschnitt 4.
 //!
 //! Die Offset-Konstanten unten sind die einzige Stelle, an der das Layout

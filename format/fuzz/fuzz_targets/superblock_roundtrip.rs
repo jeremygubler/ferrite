@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Aus dem Fuzz-Input einen *gueltigen* Superblock bauen, kodieren, dekodieren,
 //! auf Gleichheit pruefen.
 //!

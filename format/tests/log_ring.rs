@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Tests gegen Abschnitt 5.1 und 5.2 von `docs/FORMAT.md`.
 //!
 //! Das ist der Absturzpfad. Die Tests, auf die es ankommt, sind nicht die, in

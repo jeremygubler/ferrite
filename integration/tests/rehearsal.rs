@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Die Generalprobe: ein vollstaendiges Array, einmal durch den ganzen Weg.
 //!
 //! Superbloecke schreiben → zurueckleseen → assemble → Log schreiben → Replay →

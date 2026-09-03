@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Planung des Schreib- und Rebuild-Pfads.
 //!
 //! Dieses Crate rechnet aus, **was** zu tun ist — welche Parity-Blöcke ein

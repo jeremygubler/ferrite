@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Paritaetsrechnung von Ferrite: Reed-Solomon P+Q ueber GF(2^8).
 //!
 //! Dieses Crate ist die ausfuehrbare Fassung von Abschnitt 2 des

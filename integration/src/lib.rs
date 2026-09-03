@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Generalprobe fuer `format` und `parity`, vollstaendig im Speicher.
 //!
 //! Ein Member ist hier ein `Vec<u8>` mit genau dem Layout, das nach Abschnitt 3

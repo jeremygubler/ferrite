@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! `LogRecordHeader::decode` gegen beliebige Bytes.
 //!
 //! Wie beim Superblock zwei Pfade: einmal roh, einmal mit reparierter

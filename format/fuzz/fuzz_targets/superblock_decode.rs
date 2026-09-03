@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! `Superblock::decode` gegen beliebige Bytes.
 //!
 //! Zwei Pfade pro Durchlauf. Der rohe Puffer prueft, dass Magic-, Pruefsummen-

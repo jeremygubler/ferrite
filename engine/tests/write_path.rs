@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Tests des Schreibpfads.
 //!
 //! Die beiden Regeln, an denen Daten haengen: kein Checkpoint vor durabler

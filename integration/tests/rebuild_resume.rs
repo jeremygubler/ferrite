@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Der Plattentausch mit Absturz mittendrin.
 //!
 //! Die Generalprobe in `rehearsal.rs` baut einen Member in einem Zug wieder

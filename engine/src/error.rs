@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 use core::fmt;
 use ferrite_format::superblock::Role;
 use ferrite_format::FormatError;

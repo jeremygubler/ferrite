@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Der Ringpuffer der Log-Region, `docs/FORMAT.md` Abschnitt 5.1 und 5.2.
 //!
 //! Hier liegt der Absturzpfad. Alles, was dieses Modul tut, arbeitet auf einem

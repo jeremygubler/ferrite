@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! On-Disk-Format von Ferrite.
 //!
 //! Dieses Crate ist die ausfuehrbare Fassung von `docs/FORMAT.md`. Es macht

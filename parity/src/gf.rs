@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! GF(2^8), `docs/FORMAT.md` Abschnitt 2.
 //!
 //! Reduktionspolynom `x^8 + x^4 + x^3 + x^2 + 1` (`0x11D`), Generator

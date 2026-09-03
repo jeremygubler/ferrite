@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
 //! Der Rebuild-Plan, `docs/FORMAT.md` Abschnitt 4.2.
 //!
 //! Hier bekommen `member_state` und `rebuild_progress` ihren Konsumenten. Der
