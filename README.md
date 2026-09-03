@@ -133,8 +133,10 @@ anvertrauen, braucht mehr als einen Maintainer — sonst ist der Bus-Faktor
 selbst das grösste Datenrisiko. `docs/FORMAT.md` ist deshalb normativ und
 vollständig genug, um eine unabhängige Implementierung zu schreiben.
 
-Wer am Code arbeitet, liest `CLAUDE.md`: dort stehen die Invarianten, die nicht
-verhandelbar sind.
+Wie man mitmacht, steht in [`CONTRIBUTING.md`](CONTRIBUTING.md) — inklusive der
+Antwort auf die Frage, was man ohne sechs Festplatten im Keller beitragen kann.
+Kurzfassung: fast alles. Die Invarianten selbst stehen in
+[`CLAUDE.md`](CLAUDE.md).
 
 ## Lizenz
 
