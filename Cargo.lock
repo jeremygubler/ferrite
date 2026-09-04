@@ -13,6 +13,7 @@ name = "ferrite-engine"
 version = "0.1.0"
 dependencies = [
  "ferrite-format",
+ "ferrite-parity",
  "io-uring",
  "libc",
 ]

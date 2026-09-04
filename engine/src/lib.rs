@@ -43,6 +43,7 @@ pub mod rebuild;
 #[cfg(target_os = "linux")]
 pub mod ublk;
 pub mod write_path;
+pub mod write_through;
 
 pub use array::{create_array, max_payload_size, open_array, ArraySpec, MemberSpec, OpenArray};
 pub use device::{read_superblock, write_superblock, MemberDevice};
@@ -58,3 +59,4 @@ pub use write_path::{
     required_parity_update, BatchOrigin, BatchStage, BlockSituation, ParityUpdate, SourceState,
     WriteBatch,
 };
+pub use write_through::{member_for, ArrayWriter, Member};

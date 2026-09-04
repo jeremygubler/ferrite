@@ -437,3 +437,126 @@ fn btrfs_lives_on_a_ferrite_block_device() {
     let _ = std::fs::remove_file(&backing);
     let _ = std::fs::remove_dir(&mount_point);
 }
+
+// --- Der Schreibpfad hinter dem Geraet ------------------------------------
+
+#[test]
+#[ignore = "braucht Linux, Root und ublk_drv"]
+fn writes_through_the_guest_keep_the_parity_correct() {
+    // Der volle Weg: Gast schreibt auf `/dev/ublkbN`, der Schreibpfad legt
+    // einen Log-Record an, schreibt den Data-Member, zieht P und Q nach und
+    // setzt einen Checkpoint — und danach muss die Paritaet zum Inhalt der
+    // Data-Members passen.
+    use std::sync::{Arc, Mutex};
+
+    use ferrite_engine::ublk::ArraySlot;
+    use ferrite_engine::{member_for, ArrayWriter, DeviceLog, Member};
+    use ferrite_format::superblock::{Role, Superblock};
+    use ferrite_format::Uuid;
+
+    if prerequisites().is_none() {
+        return;
+    }
+
+    const SLOT_PAYLOAD: u64 = 4 << 20;
+    const LOG_PAYLOAD: u64 = 1 << 20;
+    const SLOTS: u16 = 3;
+
+    fn sb(role: Role, slot_index: u16, payload: u64) -> Superblock {
+        let mut superblock = Superblock::new(
+            Uuid::from_random_bytes([0x44; 16]),
+            Uuid::from_random_bytes([slot_index as u8 + 0x50; 16]),
+            role,
+            SLOTS as u32,
+            payload,
+        );
+        superblock.slot_index = slot_index;
+        superblock
+    }
+
+    // Ein Loop-Geraet je Member: drei Data, ein ParityP, ein ParityQ, ein Log.
+    let mut loops = Vec::new();
+    for name in ["d0", "d1", "d2", "p", "q", "log"] {
+        let Some(loop_device) = LoopDevice::create(name) else {
+            return;
+        };
+        loops.push(loop_device);
+    }
+    let path_of = |nth: usize| loops[nth].path().to_path_buf();
+
+    let log = DeviceLog::initialize(
+        MemberDevice::open(path_of(5)).expect("Log-Geraet"),
+        &sb(Role::Log, 0, LOG_PAYLOAD),
+    )
+    .expect("Log anlegen");
+
+    let data: Vec<Member> = (0..SLOTS)
+        .map(|slot| {
+            member_for(
+                MemberDevice::open(path_of(usize::from(slot))).expect("Data-Geraet"),
+                &sb(Role::Data, slot, SLOT_PAYLOAD),
+                Role::Data,
+            )
+            .expect("Data-Member")
+        })
+        .collect();
+    let parity_p = member_for(
+        MemberDevice::open(path_of(3)).expect("P-Geraet"),
+        &sb(Role::ParityP, 0, SLOT_PAYLOAD),
+        Role::ParityP,
+    )
+    .expect("ParityP");
+    let parity_q = member_for(
+        MemberDevice::open(path_of(4)).expect("Q-Geraet"),
+        &sb(Role::ParityQ, 0, SLOT_PAYLOAD),
+        Role::ParityQ,
+    )
+    .expect("ParityQ");
+
+    let writer = Arc::new(Mutex::new(
+        ArrayWriter::new(log, data, parity_p, Some(parity_q)).expect("ArrayWriter"),
+    ));
+
+    // Je Data-Slot ein ublk-Geraet, alle auf denselben Schreibpfad.
+    let spec = UblkSpec {
+        size: SLOT_PAYLOAD,
+        queue_depth: 16,
+        max_io_buf_bytes: 256 * 1024,
+        ..Default::default()
+    };
+    let mut devices = Vec::new();
+    for slot in 0..SLOTS {
+        let device = UblkDevice::start(&spec, vec![ArraySlot::new(writer.clone(), slot)])
+            .expect("ublk-Geraet starten");
+        assert!(wait_for(&device.block_path()), "Geraet nicht aufgetaucht");
+        devices.push(device);
+    }
+
+    // Der Gast schreibt auf jedes Geraet, an verschiedenen Stellen.
+    for (slot, device) in devices.iter().enumerate() {
+        let guest = MemberDevice::open(device.block_path()).expect("Gast oeffnen");
+        for round in 0..4u8 {
+            let data = pattern(slot as u8 * 16 + round, 8192);
+            let offset = u64::from(round) * 16384 + slot as u64 * 4096;
+            guest.write_at(offset, &data).expect("schreiben");
+        }
+        guest.flush().expect("flushen");
+    }
+
+    for device in devices {
+        device.stop().expect("stoppen");
+    }
+
+    // Und jetzt die Frage, um die es geht.
+    let writer = writer.lock().expect("Sperre");
+    assert!(
+        writer.verify_parity(0, 128 * 1024).unwrap(),
+        "die Paritaet passt nicht zu dem, was der Gast geschrieben hat"
+    );
+
+    // Der Gast liest zurueck, was er geschrieben hat — ueber den Schreibpfad,
+    // nicht ueber die rohe Platte.
+    let mut read_back = vec![0u8; 8192];
+    writer.read(1, 4096, &mut read_back).unwrap();
+    assert_eq!(read_back, pattern(16, 8192));
+}

@@ -8,6 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 ferrite-format = { path = "../format" }
+# Reine Rechnung ohne I/O und ohne eigene Dependencies — der Schreibpfad bildet
+# damit die Paritaet.
+ferrite-parity = { path = "../parity" }
 
 # Die ersten fremden Crates im Projekt, und sie stehen bewusst nur hier.
 #

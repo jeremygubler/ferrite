@@ -352,7 +352,9 @@ fn the_write_log_survives_a_reopen_on_a_real_block_device() {
     {
         let device = MemberDevice::open(loop_device.path()).unwrap();
         write_superblock(&device, &superblock).unwrap();
-        let mut log = DeviceLog::initialize(&device, &superblock).unwrap();
+        let mut log =
+            DeviceLog::initialize(MemberDevice::open(loop_device.path()).unwrap(), &superblock)
+                .unwrap();
         for nth in 0..4u8 {
             let payload: Vec<u8> = (0..200).map(|index| (index as u8) ^ nth).collect();
             log.append_write(0, nth as u64 * 4096, &payload).unwrap();
@@ -361,7 +363,8 @@ fn the_write_log_survives_a_reopen_on_a_real_block_device() {
 
     let device = MemberDevice::open(loop_device.path()).unwrap();
     let from_disk = read_superblock(&device).unwrap();
-    let (log, recovery) = DeviceLog::open(&device, &from_disk).unwrap();
+    let (log, recovery) =
+        DeviceLog::open(MemberDevice::open(loop_device.path()).unwrap(), &from_disk).unwrap();
 
     assert_eq!(recovery.accepted, 4);
     assert_eq!(log.next_seq(), 5);

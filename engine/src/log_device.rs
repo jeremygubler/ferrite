@@ -37,8 +37,8 @@ const ZERO_CHUNK: usize = 1 << 20;
 
 /// Das Write-Log eines Arrays auf seinem Log-Member.
 #[derive(Debug)]
-pub struct DeviceLog<'a> {
-    device: &'a MemberDevice,
+pub struct DeviceLog {
+    device: MemberDevice,
     /// Offset der Log-Region auf dem Geraet.
     region_offset: u64,
     region_len: usize,
@@ -82,16 +82,16 @@ impl LogRecovery {
     }
 }
 
-impl<'a> DeviceLog<'a> {
+impl DeviceLog {
     /// Legt die Log-Region an: nullt sie vollstaendig.
     ///
     /// Ohne das Nullen stuende dort, was die Platte vorher trug. Der Scan aus
     /// Abschnitt 5.2 faende darin Header, die zu keinem Array gehoeren, und der
     /// erste Replay begaenne irgendwo.
-    pub fn initialize(device: &'a MemberDevice, superblock: &Superblock) -> Result<Self> {
+    pub fn initialize(device: MemberDevice, superblock: &Superblock) -> Result<Self> {
         let log = Self::new(device, superblock, 0, 1)?;
         log.zero_range(0, log.region_len)?;
-        device.flush()?;
+        log.device.flush()?;
         Ok(log)
     }
 
@@ -101,14 +101,11 @@ impl<'a> DeviceLog<'a> {
     /// das Ergebnis des Replays zurueck. Die akzeptierten Writes anzuwenden ist
     /// Sache des Aufrufers — Schritt 5 aus Abschnitt 5.2 gehoert in den
     /// Schreibpfad, nicht hierher.
-    pub fn open(
-        device: &'a MemberDevice,
-        superblock: &Superblock,
-    ) -> Result<(Self, Box<LogRecovery>)> {
+    pub fn open(device: MemberDevice, superblock: &Superblock) -> Result<(Self, Box<LogRecovery>)> {
         let mut log = Self::new(device, superblock, 0, 1)?;
 
         let mut region = vec![0u8; log.region_len];
-        device.read_at(log.region_offset, &mut region)?;
+        log.device.read_at(log.region_offset, &mut region)?;
 
         let ring = LogRing::new(&region).map_err(EngineError::Format)?;
         let mut replay = ring.replay(superblock.generation);
@@ -145,7 +142,7 @@ impl<'a> DeviceLog<'a> {
     }
 
     fn new(
-        device: &'a MemberDevice,
+        device: MemberDevice,
         superblock: &Superblock,
         head: usize,
         next_seq: u64,
@@ -193,6 +190,14 @@ impl<'a> DeviceLog<'a> {
 
     pub fn region_len(&self) -> usize {
         self.region_len
+    }
+
+    /// Das Geraet, auf dem das Log liegt.
+    ///
+    /// Der Log-Member gehoert dem Log — wer ihn braucht, bekommt ihn hier und
+    /// nicht als zweiten offenen Zugriff daneben.
+    pub fn device(&self) -> &MemberDevice {
+        &self.device
     }
 
     /// Schreibt einen `Write`-Record und liefert seinen Offset in der Region.

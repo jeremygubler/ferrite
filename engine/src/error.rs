@@ -4,6 +4,7 @@
 use core::fmt;
 use ferrite_format::superblock::Role;
 use ferrite_format::FormatError;
+use ferrite_parity::ParityError;
 
 /// Fehler bei der Planung des Schreib- und Rebuild-Pfads.
 ///
@@ -67,6 +68,8 @@ pub enum EngineError {
     Ublk { what: &'static str, errno: i32 },
     /// Eine Regel aus `docs/FORMAT.md` wurde verletzt.
     Format(FormatError),
+    /// Die Paritaetsrechnung hat abgelehnt.
+    Parity(ParityError),
 }
 
 /// Verpackt einen `io::Error` mit der Angabe, was gerade versucht wurde.
@@ -131,6 +134,7 @@ impl fmt::Display for EngineError {
             },
             Self::Ublk { what, errno } => write!(f, "ublk: {what} (errno {errno})"),
             Self::Format(error) => write!(f, "{error}"),
+            Self::Parity(error) => write!(f, "{error}"),
         }
     }
 }
@@ -138,3 +142,19 @@ impl fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 pub type Result<T> = core::result::Result<T, EngineError>;
+
+impl From<ParityError> for EngineError {
+    fn from(error: ParityError) -> Self {
+        EngineError::Parity(error)
+    }
+}
+
+impl EngineError {
+    /// Verpackt einen Fehler der Paritaetsrechnung.
+    ///
+    /// Als benannte Funktion und nicht nur ueber `From`, damit sie sich in
+    /// einem `map_err` ohne Typannotation benutzen laesst.
+    pub(crate) fn from_parity(error: ParityError) -> Self {
+        EngineError::Parity(error)
+    }
+}

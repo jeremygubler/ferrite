@@ -8,12 +8,12 @@ Bit-Rot, atomare Updates. Läuft bare metal wie virtualisiert.
 
 > **Status: früh.** Das *On-Disk-Format* steht bei Version 1.0 und ist
 > eingefroren. **Ferrite selbst ist es nicht** — die beiden Versionen haben
-> nichts miteinander zu tun. Es gibt die Metadatenschicht, die Paritätsrechnung
-> und seit Meilenstein 2 den Gerätezugriff: Ferrite kann ein Array über echte
-> Platten anlegen und wieder öffnen. **Speichern kann es noch nichts** — es gibt
-> kein Blockgerät, keinen Schreibpfad, keinen Rebuild auf Platte. Lege nichts
-> darauf ab, wovon du nur eine Kopie hast — auch später nicht, bevor das
-> Crash-Harness aus Meilenstein 3 grün in CI läuft.
+> nichts miteinander zu tun. Seit Meilenstein 2 stellt Ferrite je Data-Member
+> ein Blockgerät bereit, btrfs läuft darauf, und jeder Write geht durch Log und
+> Parität. **Trotzdem: Lege nichts darauf ab, wovon du nur eine Kopie hast.**
+> Der Rebuild auf Platte fehlt, und vor allem fehlt der Nachweis, dass beim
+> Stromausfall nichts verlorengeht — das ist das Crash-Harness aus Meilenstein 3,
+> und bis es grün in CI läuft, ist jede Zusage über Dauerhaftigkeit ungedeckt.
 
 ## Warum
 
@@ -68,7 +68,8 @@ Entwickler nie findet.
    das Format einmal vollständig durchgespielt — ohne Blockgerät. Ab hier darf
    Code Bytes auf eine echte Platte schreiben.
 2. **Paritäts-Engine.** Reed-Solomon P+Q, Gerätezugriff und das Write-Log auf
-   Platte und das ublk-Target sind fertig; offen sind Schreibpfad und Rebuild.
+   Platte, das ublk-Target und der Schreibpfad sind fertig; offen ist der
+   Rebuild auf Platte.
    **Braucht Linux** mit geladenem `ublk_drv`.
 3. **Crash-Harness.** `dm-flakey` und `dm-dust` für Lesefehler und stille
    Korruption, Power-Fail per `SIGKILL` an zufälligen Punkten im Schreibpfad,
@@ -98,7 +99,7 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf — 116 Tests grün, dazu 9 auf Blockgeräten und 7 auf echten ublk-Geräten. Schreibpfad und Rebuild offen |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität — 130 Tests grün (120 davon plattformunabhängig), dazu 9 auf Blockgeräten und 8 auf echten ublk-Geräten. Rebuild auf Platte offen |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |

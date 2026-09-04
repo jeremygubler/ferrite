@@ -74,7 +74,7 @@ fn initialising_zeroes_the_whole_region() {
         .write_at(DEFAULT_PAYLOAD_OFFSET + REGION - 4096, &[0xA5u8; 4096])
         .unwrap();
 
-    let log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
     assert!(log.read_region().unwrap().iter().all(|&byte| byte == 0));
     assert_eq!(log.head(), 0);
     assert_eq!(log.next_seq(), 1);
@@ -83,12 +83,11 @@ fn initialising_zeroes_the_whole_region() {
 #[test]
 fn a_member_that_is_not_the_log_is_refused() {
     let scratch = Scratch::new("falsche-rolle");
-    let device = scratch.open();
     let mut superblock = log_superblock();
     superblock.role = Role::Data;
 
     assert!(matches!(
-        DeviceLog::initialize(&device, &superblock),
+        DeviceLog::initialize(scratch.open(), &superblock),
         Err(EngineError::Format(FormatError::InvalidField {
             field: "role",
             ..
@@ -101,8 +100,7 @@ fn a_member_that_is_not_the_log_is_refused() {
 #[test]
 fn a_record_written_to_the_device_is_found_again() {
     let scratch = Scratch::new("record");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     let data = payload(0x3C, 1000);
     let offset = log.append_write(2, 8192, &data).unwrap();
@@ -126,14 +124,13 @@ fn the_slack_of_the_last_sector_is_zero() {
     // Abschnitt 5.1: Der Rest des letzten belegten Sektors MUSS als Null
     // geschrieben werden. Sonst liegt dort der Rest einer frueheren Runde.
     let scratch = Scratch::new("slack");
-    let device = scratch.open();
 
     // Erst die Region vollschreiben, dann neu anlegen und einen kurzen
     // Record hineinsetzen.
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
     log.append_write(0, 0, &payload(0xFF, 4000)).unwrap();
 
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
     log.append_write(0, 0, &payload(0x11, 8)).unwrap();
 
     let region = log.read_region().unwrap();
@@ -149,8 +146,7 @@ fn the_slack_of_the_last_sector_is_zero() {
 #[test]
 fn several_records_form_a_chain() {
     let scratch = Scratch::new("kette");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     for nth in 0..5u8 {
         log.append_write(nth as u16 % 4, nth as u64 * 4096, &payload(nth, 512))
@@ -173,8 +169,7 @@ fn a_checkpoint_moves_the_starting_point_of_the_replay() {
     // Data-Members und in der Paritaet. Der Replay beginnt deshalb *hinter*
     // ihm — was davor steht, noch einmal anzuwenden waere Arbeit ohne Wirkung.
     let scratch = Scratch::new("checkpoint");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     log.append_write(0, 0, &payload(1, 64)).unwrap();
     log.append_checkpoint().unwrap();
@@ -196,8 +191,7 @@ fn a_checkpoint_moves_the_starting_point_of_the_replay() {
 fn reopening_finds_the_head_and_the_next_sequence_number() {
     let scratch = Scratch::new("neustart");
     {
-        let device = scratch.open();
-        let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+        let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
         for nth in 0..3u8 {
             log.append_write(0, nth as u64 * 4096, &payload(nth, 100))
                 .unwrap();
@@ -205,8 +199,7 @@ fn reopening_finds_the_head_and_the_next_sequence_number() {
     }
 
     // Neues Geraet, neues Log — alles kommt von der Platte.
-    let device = scratch.open();
-    let (log, recovery) = DeviceLog::open(&device, &log_superblock()).unwrap();
+    let (log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
     assert_eq!(recovery.accepted, 3);
     assert_eq!(recovery.next_seq, 4);
     assert_eq!(log.next_seq(), 4);
@@ -224,14 +217,12 @@ fn reopening_finds_the_head_and_the_next_sequence_number() {
 fn writing_continues_where_the_replay_stopped() {
     let scratch = Scratch::new("fortsetzen");
     {
-        let device = scratch.open();
-        let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+        let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
         log.append_write(0, 0, &payload(1, 100)).unwrap();
         log.append_write(0, 4096, &payload(2, 100)).unwrap();
     }
 
-    let device = scratch.open();
-    let (mut log, _) = DeviceLog::open(&device, &log_superblock()).unwrap();
+    let (mut log, _) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
     log.append_write(0, 8192, &payload(3, 100)).unwrap();
 
     let region = log.read_region().unwrap();
@@ -244,10 +235,9 @@ fn writing_continues_where_the_replay_stopped() {
 #[test]
 fn an_empty_log_reopens_as_empty() {
     let scratch = Scratch::new("leer");
-    let device = scratch.open();
-    DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
-    let (log, recovery) = DeviceLog::open(&device, &log_superblock()).unwrap();
+    let (log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
     assert_eq!(recovery.accepted, 0);
     assert_eq!(log.head(), 0);
     assert_eq!(log.next_seq(), 1);
@@ -259,7 +249,7 @@ fn a_torn_record_stops_the_replay() {
     // verworfen — auch wenn es in sich gueltig ist (Abschnitt 5.2, Schritt 4).
     let scratch = Scratch::new("torn");
     let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
     for nth in 0..4u8 {
         log.append_write(0, nth as u64 * 4096, &payload(nth, 100))
             .unwrap();
@@ -274,7 +264,7 @@ fn a_torn_record_stops_the_replay() {
         .unwrap();
     device.flush().unwrap();
 
-    let (log, recovery) = DeviceLog::open(&device, &log_superblock()).unwrap();
+    let (log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
     assert_eq!(recovery.accepted, 1, "nur der erste Record zaehlt");
     assert_eq!(log.next_seq(), 2);
     assert!(recovery.stop.is_some());
@@ -285,8 +275,7 @@ fn a_torn_record_stops_the_replay() {
 #[test]
 fn the_ring_wraps_with_a_padding_record() {
     let scratch = Scratch::new("umlauf");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     // Bis auf einen Sektor vollschreiben, dann einen Record, der zwei
     // braucht — er passt nicht mehr und erzwingt ein Padding.
@@ -313,8 +302,7 @@ fn a_stale_checkpoint_in_the_padding_area_is_erased() {
     // ein intakter Checkpoint aus einer frueheren Runde stehen, findet ihn
     // Schritt 2 des Recovery — und der Replay beginnt an der falschen Stelle.
     let scratch = Scratch::new("alter-checkpoint");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     // Erste Runde: die Region bis kurz vor das Ende fuellen, unterwegs ein
     // Checkpoint mit hoher Sequenznummer.
@@ -346,8 +334,7 @@ fn a_stale_checkpoint_in_the_padding_area_is_erased() {
 #[test]
 fn the_chain_survives_the_wrap() {
     let scratch = Scratch::new("umlauf-kette");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     // Einmal ganz herum und ein Stueck weiter, mit einem Checkpoint kurz vor
     // Schluss — sonst beginnt der Replay bei der niedrigsten Sequenznummer,
@@ -360,7 +347,7 @@ fn the_chain_survives_the_wrap() {
     let after_checkpoint = log.next_seq();
     log.append_write(0, 0, &payload(0x7F, 64)).unwrap();
 
-    let (reopened, recovery) = DeviceLog::open(&device, &log_superblock()).unwrap();
+    let (reopened, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
     // Nach dem Umlauf steht der Checkpoint irgendwo mitten in der Region und
     // der Record danach am Anfang oder dahinter — der Replay findet ihn
     // trotzdem, und zwar genau ihn.
@@ -378,8 +365,7 @@ fn the_chain_survives_the_wrap() {
 #[test]
 fn a_record_larger_than_the_region_is_refused() {
     let scratch = Scratch::new("zu-gross");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     assert!(matches!(
         log.append_write(0, 0, &payload(0, REGION as usize + 1)),
@@ -393,8 +379,7 @@ fn a_record_larger_than_the_region_is_refused() {
 #[test]
 fn a_payload_that_does_not_match_the_header_is_refused() {
     let scratch = Scratch::new("laenge");
-    let device = scratch.open();
-    let mut log = DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     let header = LogRecordHeader::write(1, 0, 0, &payload(0, 100));
     assert!(matches!(
@@ -409,11 +394,10 @@ fn a_payload_that_does_not_match_the_header_is_refused() {
 #[test]
 fn a_read_only_log_refuses_to_be_written() {
     let scratch = Scratch::new("nur-lesend");
-    let device = scratch.open();
-    DeviceLog::initialize(&device, &log_superblock()).unwrap();
+    DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
 
     let read_only = MemberDevice::open_read_only(&scratch.0).unwrap();
-    let (mut log, _) = DeviceLog::open(&read_only, &log_superblock()).unwrap();
+    let (mut log, _) = DeviceLog::open(read_only, &log_superblock()).unwrap();
     assert_eq!(
         log.append_write(0, 0, &payload(0, 64)),
         Err(EngineError::NotWritable)

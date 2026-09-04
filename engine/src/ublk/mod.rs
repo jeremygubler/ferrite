@@ -33,7 +33,7 @@ pub mod control;
 pub mod queue;
 pub mod uapi;
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
 pub use control::{UblkControl, UblkSpec, CONTROL_PATH};
@@ -41,6 +41,7 @@ pub use queue::{Completion, Request, RequestKind, UblkQueue};
 
 use crate::device::MemberDevice;
 use crate::error::{EngineError, Result};
+use crate::write_through::ArrayWriter;
 
 /// Was hinter einem ublk-Geraet steckt.
 ///
@@ -110,6 +111,55 @@ impl Target for Passthrough {
 
     fn flush(&mut self) -> Result<()> {
         self.device.flush()
+    }
+}
+
+/// Ein Target, das durch den Schreibpfad geht: Log, Data-Member, Paritaet.
+///
+/// Jeder Data-Member bekommt ein eigenes ublk-Geraet, alle teilen sich einen
+/// [`ArrayWriter`] — Paritaet und Log sind gemeinsame Ressourcen, und zwei
+/// gleichzeitige Writes duerfen sich dabei nicht in die Quere kommen. Die
+/// Sperre ist grob und das ist Absicht: Eine feinere braucht eine Aussage
+/// darueber, welche Bereiche sich ueberlappen duerfen, und die gehoert
+/// gemessen und nicht geraten.
+#[derive(Debug)]
+pub struct ArraySlot {
+    writer: Arc<Mutex<ArrayWriter>>,
+    slot_index: u16,
+}
+
+impl ArraySlot {
+    pub fn new(writer: Arc<Mutex<ArrayWriter>>, slot_index: u16) -> Self {
+        ArraySlot { writer, slot_index }
+    }
+
+    /// Die Sperre nehmen, ohne bei einer vergifteten Sperre zu verzweifeln.
+    ///
+    /// Vergiftet heisst: Ein anderer Thread ist mitten im Schreibpfad
+    /// abgestuerzt. Weiterzuarbeiten waere Rechnen auf einem Zustand, ueber den
+    /// niemand etwas weiss — also ein Fehler nach aussen statt eines `unwrap`.
+    fn writer(&self) -> Result<std::sync::MutexGuard<'_, ArrayWriter>> {
+        self.writer.lock().map_err(|_| EngineError::Ublk {
+            what: "der Schreibpfad ist in einem anderen Thread abgestuerzt",
+            errno: libc::EIO,
+        })
+    }
+}
+
+impl Target for ArraySlot {
+    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        self.writer()?.read(self.slot_index, offset, buffer)
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.writer()?.write(self.slot_index, offset, data)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // Im Write-Through ist beim Ruecksprung aus `write` bereits alles
+        // durable — Data-Member, Paritaet und der Checkpoint. Ein FLUSH des
+        // Gastes verlangt damit nichts, was nicht schon gilt.
+        Ok(())
     }
 }
 

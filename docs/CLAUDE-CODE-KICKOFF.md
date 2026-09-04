@@ -258,6 +258,40 @@ passt, rekonstruiert das Array nach dem nächsten Plattenausfall Müll.
 
 Welches Verfahren erlaubt ist, sagt `required_parity_update`. Rate es nicht neu.
 
+> **Erledigt** in `engine/src/write_through.rs`, als `ArrayWriter`. `ublk::ArraySlot`
+> hängt ihn hinter das Blockgerät: alle Data-Slots teilen sich einen Schreibpfad,
+> weil Log und Parität gemeinsame Ressourcen sind.
+>
+> **Nur Write-Through, und das ist eine Entscheidung, keine halbe Sache.**
+> Abschnitt 5 kennt beide Betriebsarten, aber Write-Back ist nach 5.3 nur
+> erlaubt, wenn der Flush-Test `Honest` ergibt — und das tut er auf keiner
+> Maschine, die dieses Projekt bisher gesehen hat. Ein Write-Back-Pfad wäre Code
+> im Schreibpfad, den niemand ausführen kann, und er bräuchte einen Index über
+> die noch nicht angewendeten Writes, dessen Absturzverhalten erst das
+> Crash-Harness prüfen kann. Dieselbe Begründung wie bei `NEED_GET_DATA` in
+> Aufgabe 3.
+>
+> Das Log ist deshalb nicht überflüssig: Es trägt den Absturzpfad. Fällt der
+> Strom zwischen Data-Member und Parität aus, sagt der Replay, was neu zu rechnen
+> ist.
+>
+> **Parität über Bytebereiche, nicht über Blöcke.** `P[i] = ⊕ⱼ Dⱼ[i]` gilt für
+> jedes einzelne Byte; ein Write über `a..b` ändert genau `a..b` der Parität.
+> Blöcke sind eine Einheit für die Bündelung, nicht für die Korrektheit — also
+> wird nur der berührte Bereich angefasst.
+>
+> **Das Verfahren wird nicht geraten:** `required_parity_update` entscheidet,
+> und `both_methods_produce_the_same_parity` weist nach, dass Fortschreiben und
+> Neurechnen dasselbe Ergebnis liefern. Weichen sie ab, ist eines von beiden
+> falsch — und welches, sagt kein Test, der nur eines von ihnen benutzt.
+>
+> **Geprüft wird gegen die Definition, nicht gegen den Code:**
+> `parity_p_is_the_xor_of_all_data_members` und
+> `parity_q_uses_the_slot_index_as_exponent` rechnen von Hand nach, statt sich
+> von `verify_parity` die eigene Rechnung bestätigen zu lassen.
+> `writes_through_the_guest_keep_the_parity_correct` macht dasselbe über echte
+> ublk-Geräte.
+
 ### 5 — Rebuild
 
 `RebuildPlan` aus dem Superblock fortsetzen, Stapel rekonstruieren, **erst die
