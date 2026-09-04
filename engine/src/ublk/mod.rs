@@ -281,6 +281,14 @@ impl UblkDevice {
     /// Nimmt `self`, weil es danach keins mehr gibt. Ein `stop`, das man
     /// zweimal aufrufen kann, waere ein zweites `DEL_DEV` auf eine Nummer, die
     /// inzwischen jemand anderem gehoert.
+    ///
+    /// **Vorher muss `/dev/ublkbN` geschlossen sein.** `DEL_DEV` wartet im
+    /// Kernel darauf, dass niemand das Blockgeraet mehr offen haelt — haelt der
+    /// Aufrufer es selbst noch, wartet er auf sich. Das ist keine Eigenheit
+    /// dieser Umsetzung, sondern die Semantik des Treibers; es steht hier, weil
+    /// es sich sonst als haengender Aufruf ohne Fehlermeldung zeigt. Ein
+    /// Zeitlimit einzubauen waere die falsche Antwort: Es machte aus einem
+    /// Programmierfehler ein sporadisch zurueckgelassenes Geraet.
     pub fn stop(mut self) -> Result<()> {
         // `STOP_DEV` laesst die ausstehenden FETCHes fehlschlagen, und daran
         // erkennen die Queue-Threads, dass Schluss ist.

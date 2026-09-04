@@ -560,3 +560,181 @@ fn writes_through_the_guest_keep_the_parity_correct() {
     writer.read(1, 4096, &mut read_back).unwrap();
     assert_eq!(read_back, pattern(16, 8192));
 }
+
+#[test]
+#[ignore = "braucht Linux, Root und ublk_drv"]
+fn a_failed_disk_is_rebuilt_while_the_guest_keeps_reading() {
+    // Wofuer die ganze Paritaet da ist: Eine Platte faellt aus, der Gast liest
+    // weiter — rekonstruiert, ohne es zu merken —, der Rebuild holt sie zurueck,
+    // und danach steht wieder alles auf der Platte.
+    use std::sync::{Arc, Mutex};
+
+    use ferrite_engine::ublk::ArraySlot;
+    use ferrite_engine::{member_for, ArrayWriter, DeviceLog, DiskRebuild, Member};
+    use ferrite_format::superblock::{MemberState, Role, Superblock};
+    use ferrite_format::Uuid;
+
+    if prerequisites().is_none() {
+        return;
+    }
+
+    const SLOT_PAYLOAD: u64 = 4 << 20;
+    const LOG_PAYLOAD: u64 = 1 << 20;
+    const SLOTS: u16 = 3;
+    const BLOCK: u64 = 64 * 1024;
+
+    fn sb(role: Role, slot_index: u16, payload: u64) -> Superblock {
+        let mut superblock = Superblock::new(
+            Uuid::from_random_bytes([0x66; 16]),
+            Uuid::from_random_bytes([slot_index as u8 + 0x70; 16]),
+            role,
+            SLOTS as u32,
+            payload,
+        );
+        superblock.slot_index = slot_index;
+        superblock
+    }
+
+    let mut loops = Vec::new();
+    for name in ["rd0", "rd1", "rd2", "rp", "rq", "rlog"] {
+        let Some(loop_device) = LoopDevice::create(name) else {
+            return;
+        };
+        loops.push(loop_device);
+    }
+    let path_of = |nth: usize| loops[nth].path().to_path_buf();
+
+    let log = DeviceLog::initialize(
+        MemberDevice::open(path_of(5)).expect("Log-Geraet"),
+        &sb(Role::Log, 0, LOG_PAYLOAD),
+    )
+    .expect("Log anlegen");
+
+    let data: Vec<Member> = (0..SLOTS)
+        .map(|slot| {
+            member_for(
+                MemberDevice::open(path_of(usize::from(slot))).expect("Data-Geraet"),
+                &sb(Role::Data, slot, SLOT_PAYLOAD),
+                Role::Data,
+            )
+            .expect("Data-Member")
+        })
+        .collect();
+    let parity_p = member_for(
+        MemberDevice::open(path_of(3)).expect("P-Geraet"),
+        &sb(Role::ParityP, 0, SLOT_PAYLOAD),
+        Role::ParityP,
+    )
+    .expect("ParityP");
+    let parity_q = member_for(
+        MemberDevice::open(path_of(4)).expect("Q-Geraet"),
+        &sb(Role::ParityQ, 0, SLOT_PAYLOAD),
+        Role::ParityQ,
+    )
+    .expect("ParityQ");
+
+    let writer = Arc::new(Mutex::new(
+        ArrayWriter::new(log, data, parity_p, Some(parity_q)).expect("ArrayWriter"),
+    ));
+
+    let spec = UblkSpec {
+        size: SLOT_PAYLOAD,
+        queue_depth: 16,
+        max_io_buf_bytes: 256 * 1024,
+        ..Default::default()
+    };
+
+    // Der Gast schreibt ueber das Blockgeraet auf Slot 1.
+    let mut written = Vec::new();
+    {
+        let device = UblkDevice::start(&spec, vec![ArraySlot::new(writer.clone(), 1)])
+            .expect("Geraet starten");
+        assert!(wait_for(&device.block_path()), "Geraet nicht aufgetaucht");
+
+        let guest = MemberDevice::open(device.block_path()).expect("Gast oeffnen");
+        for block in 0..8u64 {
+            let data = pattern(block as u8 + 0x80, 16384);
+            guest.write_at(block * BLOCK, &data).expect("schreiben");
+            written.push(data);
+        }
+        guest.flush().expect("flushen");
+        // Erst schliessen, dann stoppen: `DEL_DEV` wartet darauf, dass niemand
+        // mehr `/dev/ublkbN` offen haelt.
+        drop(guest);
+        device.stop().expect("stoppen");
+    }
+
+    // Die Platte faellt aus: als `Stale` melden und ihren Inhalt zerstoeren.
+    {
+        let mut guard = writer.lock().expect("Sperre");
+        guard
+            .mark_member(1, MemberState::Stale, 0)
+            .expect("Ausfall melden");
+        let member = guard.member(1).expect("Member");
+        member
+            .device()
+            .write_at(
+                member.superblock().payload_offset,
+                &vec![0x5Au8; SLOT_PAYLOAD as usize],
+            )
+            .expect("Inhalt zerstoeren");
+        member.device().flush().expect("flushen");
+    }
+
+    // Der Gast liest weiter — und bekommt seine Daten, rekonstruiert aus der
+    // Paritaet. Auf der Platte darunter steht in diesem Moment Muell.
+    {
+        let device = UblkDevice::start(&spec, vec![ArraySlot::new(writer.clone(), 1)])
+            .expect("Geraet im degradierten Betrieb starten");
+        assert!(wait_for(&device.block_path()), "Geraet nicht aufgetaucht");
+
+        let guest = MemberDevice::open_read_only(device.block_path()).expect("Gast oeffnen");
+        for (block, expected) in written.iter().enumerate() {
+            let mut read_back = vec![0u8; expected.len()];
+            guest
+                .read_at(block as u64 * BLOCK, &mut read_back)
+                .expect("lesen");
+            assert_eq!(
+                &read_back, expected,
+                "Block {block} wurde im degradierten Betrieb nicht rekonstruiert"
+            );
+        }
+        drop(guest);
+        device.stop().expect("stoppen");
+    }
+
+    // Rebuild.
+    {
+        let mut guard = writer.lock().expect("Sperre");
+        let mut rebuild = DiskRebuild::resume(&guard, 1).expect("Rebuild aufsetzen");
+        assert_eq!(rebuild.remaining_blocks(), SLOT_PAYLOAD / BLOCK);
+        rebuild.run(&mut guard, 8).expect("Rebuild durchfuehren");
+        assert_eq!(
+            guard.member(1).unwrap().superblock().member_state,
+            MemberState::Clean
+        );
+        assert!(guard
+            .verify_parity(0, (8 * BLOCK) as usize)
+            .expect("Paritaet pruefen"));
+    }
+
+    // Und jetzt liegt der Inhalt wirklich auf der Platte — roh gelesen, ohne
+    // den Schreibpfad und ohne Rekonstruktion.
+    let payload_offset = writer
+        .lock()
+        .expect("Sperre")
+        .member(1)
+        .unwrap()
+        .superblock()
+        .payload_offset;
+    let raw = MemberDevice::open_read_only(path_of(1)).expect("Platte oeffnen");
+    for (block, expected) in written.iter().enumerate() {
+        let mut from_disk = vec![0u8; expected.len()];
+        raw.read_at(payload_offset + block as u64 * BLOCK, &mut from_disk)
+            .expect("roh lesen");
+        assert_eq!(
+            &from_disk, expected,
+            "Block {block} steht nach dem Rebuild nicht auf der Platte"
+        );
+    }
+}

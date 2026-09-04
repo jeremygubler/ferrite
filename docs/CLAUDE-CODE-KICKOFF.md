@@ -301,6 +301,44 @@ meldest du nach einem Absturz Blöcke als fertig, die nie geschrieben wurden.
 `integration/tests/rebuild_resume.rs` spielt genau das im Speicher durch. Der
 Test auf echten Geräten muss dasselbe Ergebnis liefern.
 
+> **Erledigt** in `engine/src/write_through.rs` als `DiskRebuild`.
+>
+> **Die Reihenfolge ist die Aussage:** rekonstruieren → schreiben → `flush` →
+> *erst dann* `rebuild_progress` in den Superblock, und der wird ebenfalls
+> geflusht. `the_progress_never_runs_ahead_of_the_blocks` prüft nach jedem
+> Stapel, dass alles unterhalb des Fortschritts **roh** auf der Platte steht —
+> ohne Rekonstruktion, sonst prüfte der Test sich selbst.
+>
+> `a_rebuild_resumes_from_the_superblock_after_a_crash` bricht mittendrin ab und
+> setzt aus einem frischen Plan fort, der nur den Superblock kennt. Dasselbe
+> Ergebnis wie im Speicher-Durchlauf.
+>
+> **Der Zustand kommt nicht mehr von aussen.** `set_sources` ist weg; ob ein
+> Member brauchbar ist, leitet `ArrayWriter` aus `member_state` und
+> `rebuild_progress` ab. Ein zweiter Ort für denselben Zustand ist ein Ort, an
+> dem er abweichen kann — und nach einem Neustart ist der Superblock ohnehin das
+> Einzige, was noch da ist.
+>
+> **Ein Fall, der beim Bauen aufkam und keine geratene Antwort bekommen hat:**
+> Ein Write geht auf einen Block, den der Member noch nicht zurückbekommen hat.
+> Sein alter Inhalt ist nicht lesbar, also käme das Fortschreiben nicht an
+> `D_alt`. Die Lösung folgt aus der Redundanz statt aus einer Sonderregel:
+> `D_alt` wird aus der Parität rekonstruiert, `P' = P ^ D_alt ^ D_neu` bleibt
+> stimmig, und eine spätere Rekonstruktion desselben Blocks liefert wieder
+> `D_neu`. `a_write_to_a_not_yet_rebuilt_block_keeps_the_parity_right` hält das
+> fest.
+>
+> **Offen und benannt:** Fallen *zwei* Data-Slots gleichzeitig aus, reicht P
+> nicht. `parity/` kann den Fall über Q (`reconstruct_two_from_pq`), aber die
+> Buchführung darüber, welche zwei gemeint sind, fehlt in der Engine noch.
+> `two_unusable_members_stop_the_reconstruction` meldet stattdessen einen
+> Fehler, statt eine der falschen Antworten zu geben.
+>
+> Auf echten Geräten: `a_failed_disk_is_rebuilt_while_the_guest_keeps_reading` —
+> der Gast schreibt über `/dev/ublkbN`, die Platte fällt aus und wird
+> überschrieben, der Gast liest weiter (rekonstruiert), der Rebuild läuft, und
+> danach steht der Inhalt wieder roh auf der Platte.
+
 ## Was offen ist und nicht geraten wird
 
 **Absturz im degradierten Betrieb.** Neurechnen der Parität scheitert am

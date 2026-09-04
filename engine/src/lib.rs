@@ -59,4 +59,4 @@ pub use write_path::{
     required_parity_update, BatchOrigin, BatchStage, BlockSituation, ParityUpdate, SourceState,
     WriteBatch,
 };
-pub use write_through::{member_for, ArrayWriter, Member};
+pub use write_through::{member_for, ArrayWriter, DiskRebuild, Member};

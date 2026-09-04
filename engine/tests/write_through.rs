@@ -13,9 +13,9 @@ use std::fs::File;
 use std::path::PathBuf;
 
 use ferrite_engine::{
-    member_for, ArrayWriter, DeviceLog, EngineError, Member, MemberDevice, SourceState,
+    member_for, ArrayWriter, DeviceLog, DiskRebuild, EngineError, Member, MemberDevice,
 };
-use ferrite_format::superblock::{Role, Superblock, DEFAULT_PAYLOAD_OFFSET};
+use ferrite_format::superblock::{MemberState, Role, Superblock, DEFAULT_PAYLOAD_OFFSET};
 use ferrite_format::{LogRing, Uuid};
 use ferrite_parity::gf;
 
@@ -313,13 +313,18 @@ fn the_record_carries_slot_and_offset() {
 #[test]
 fn the_degraded_case_keeps_the_parity_right() {
     // Im degradierten Betrieb ist Neurechnen unmoeglich, also wird
-    // fortgeschrieben. Solange alle Members noch lesbar sind, muss dabei
-    // dasselbe herauskommen — dieser Test haelt das fest.
+    // fortgeschrieben. Solange der Inhalt des gemeldeten Members noch dasteht,
+    // muss dabei dasselbe herauskommen — dieser Test haelt das fest.
+    //
+    // Der Zustand kommt aus dem Superblock und nicht aus einem Schalter am
+    // Schreibpfad: Genau so erfaehrt ihn die Engine nach einem Neustart.
     let mut scratch = Scratch::new("degradiert");
     let mut writer = build(&mut scratch, &[BLOCK; 5], true);
 
     writer.write(0, 0, &pattern(1, 2048)).unwrap();
-    writer.set_sources(SourceState::Degraded);
+    writer
+        .mark_member(4, MemberState::Stale, 0)
+        .expect("Member als unbrauchbar melden");
 
     for round in 0..4u8 {
         writer
@@ -341,17 +346,17 @@ fn both_methods_produce_the_same_parity() {
     // Fortschreiben und Neurechnen sind zwei Wege zum selben Ergebnis. Weichen
     // sie ab, ist einer von beiden falsch — und welcher, sagt kein Test, der
     // nur einen von ihnen benutzt.
-    let mut incremental = Scratch::new("fortschreiben");
+    //
+    // Bei drei Slots mit Q ist Neurechnen guenstiger und wird gewaehlt; ist ein
+    // Member unbrauchbar gemeldet, bleibt nur das Fortschreiben. Beide Arrays
+    // bekommen dieselben Daten in dieselben Slots.
     let mut recompute = Scratch::new("neurechnen");
-    let mut a = build(&mut incremental, &[BLOCK; 6], true);
-    let mut b = build(&mut recompute, &[BLOCK; 6], true);
+    let mut incremental = Scratch::new("fortschreiben");
+    let mut a = build(&mut recompute, &[BLOCK; 3], true);
+    let mut b = build(&mut incremental, &[BLOCK; 3], true);
+    b.mark_member(2, MemberState::Stale, 0).unwrap();
 
-    // `Degraded` erzwingt Fortschreiben, `AllValid` bei sechs Slots und einem
-    // geschriebenen waehlt ebenfalls Fortschreiben — deshalb wird bei `b`
-    // ueber alle Slots geschrieben, was das Neurechnen guenstiger macht.
-    a.set_sources(SourceState::Degraded);
-
-    for slot in 0..6u16 {
+    for slot in 0..2u16 {
         let data = pattern(slot as u8, 1500);
         a.write(slot, 2048, &data).unwrap();
         b.write(slot, 2048, &data).unwrap();
@@ -366,6 +371,244 @@ fn both_methods_produce_the_same_parity() {
     a.read_parity_q(2048, &mut from_a).unwrap();
     b.read_parity_q(2048, &mut from_b).unwrap();
     assert_eq!(from_a, from_b, "Q weicht zwischen den Verfahren ab");
+}
+
+// --- Rekonstruktion und Rebuild -------------------------------------------
+
+#[test]
+fn a_read_from_an_unusable_member_is_reconstructed() {
+    // Die Redundanz von aussen betrachtet: Der Aufrufer merkt nicht, dass der
+    // Member nichts mehr traegt. Genau dafuer gibt es sie.
+    let mut scratch = Scratch::new("rekonstruktion");
+    let mut writer = build(&mut scratch, &[BLOCK; 4], false);
+
+    let expected = pattern(0x9C, 4096);
+    writer.write(1, 0, &expected).unwrap();
+    writer.write(0, 0, &pattern(0x1A, 4096)).unwrap();
+    writer.write(2, 0, &pattern(0x2B, 4096)).unwrap();
+
+    // Den Member fuer unbrauchbar erklaeren und seinen Inhalt zerstoeren.
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    let payload_offset = writer.member(1).unwrap().superblock().payload_offset;
+    writer
+        .member(1)
+        .unwrap()
+        .device()
+        .write_at(payload_offset, &[0xFFu8; 4096])
+        .unwrap();
+
+    let mut read_back = vec![0u8; 4096];
+    writer.read(1, 0, &mut read_back).unwrap();
+    assert_eq!(read_back, expected, "nicht aus der Paritaet rekonstruiert");
+}
+
+#[test]
+fn a_rebuild_restores_the_member_from_parity() {
+    let mut scratch = Scratch::new("rebuild");
+    let mut writer = build(&mut scratch, &[4 * BLOCK; 3], true);
+
+    // Etwas hineinschreiben, das nachher wieder dastehen muss.
+    let mut expected = Vec::new();
+    for block in 0..4u64 {
+        let data = pattern(block as u8 + 0x40, 8192);
+        writer.write(1, block * BLOCK, &data).unwrap();
+        expected.push(data);
+    }
+
+    // Platte tauschen: Member als `Stale` melden und den Inhalt loeschen.
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    let payload_offset = writer.member(1).unwrap().superblock().payload_offset;
+    writer
+        .member(1)
+        .unwrap()
+        .device()
+        .write_at(payload_offset, &vec![0xEEu8; (4 * BLOCK) as usize])
+        .unwrap();
+
+    let mut rebuild = DiskRebuild::resume(&writer, 1).expect("Rebuild aufsetzen");
+    assert_eq!(rebuild.remaining_blocks(), 4);
+    rebuild.run(&mut writer, 2).expect("Rebuild durchfuehren");
+    assert!(rebuild.is_complete());
+
+    // Der Member ist wieder `Clean` und traegt seinen Inhalt.
+    assert_eq!(
+        writer.member(1).unwrap().superblock().member_state,
+        MemberState::Clean
+    );
+    assert_eq!(writer.member(1).unwrap().superblock().rebuild_progress, 0);
+    for (block, data) in expected.iter().enumerate() {
+        let mut read_back = vec![0u8; data.len()];
+        writer
+            .read(1, block as u64 * BLOCK, &mut read_back)
+            .unwrap();
+        assert_eq!(&read_back, data, "Block {block} nicht wiederhergestellt");
+    }
+    assert!(writer.verify_parity(0, (4 * BLOCK) as usize).unwrap());
+}
+
+#[test]
+fn a_rebuild_resumes_from_the_superblock_after_a_crash() {
+    // Der Fall, um den es geht: Der Rebuild bricht mittendrin ab, und was
+    // danach passiert, haengt allein an dem, was auf der Platte steht.
+    // `integration/tests/rebuild_resume.rs` spielt das im Speicher durch —
+    // hier muss dasselbe herauskommen.
+    let mut scratch = Scratch::new("wiederaufnahme");
+    let mut writer = build(&mut scratch, &[6 * BLOCK; 3], false);
+
+    for block in 0..6u64 {
+        writer
+            .write(2, block * BLOCK, &pattern(block as u8, 4096))
+            .unwrap();
+    }
+    writer.mark_member(2, MemberState::Stale, 0).unwrap();
+    let payload_offset = writer.member(2).unwrap().superblock().payload_offset;
+    writer
+        .member(2)
+        .unwrap()
+        .device()
+        .write_at(payload_offset, &vec![0x77u8; (6 * BLOCK) as usize])
+        .unwrap();
+
+    // Zwei Stapel zu zwei Bloecken, dann Abbruch. Der Plan verlaesst diesen
+    // Block und ist damit weg — genau wie nach einem Absturz.
+    {
+        let mut rebuild = DiskRebuild::resume(&writer, 2).unwrap();
+        assert!(rebuild.step(&mut writer, 2).unwrap());
+        assert!(rebuild.step(&mut writer, 2).unwrap());
+    }
+
+    // Der Fortschritt steht auf der Platte, nicht im Arbeitsspeicher.
+    let superblock = writer.member(2).unwrap().superblock().clone();
+    assert_eq!(superblock.member_state, MemberState::Rebuilding);
+    assert_eq!(superblock.rebuild_progress, 4 * BLOCK);
+
+    // Ein frischer Plan aus genau diesem Superblock macht dort weiter.
+    let mut resumed = DiskRebuild::resume(&writer, 2).unwrap();
+    assert_eq!(resumed.next_block(), 4);
+    assert_eq!(resumed.remaining_blocks(), 2);
+    resumed.run(&mut writer, 8).unwrap();
+
+    assert_eq!(
+        writer.member(2).unwrap().superblock().member_state,
+        MemberState::Clean
+    );
+    for block in 0..6u64 {
+        let mut read_back = vec![0u8; 4096];
+        writer.read(2, block * BLOCK, &mut read_back).unwrap();
+        assert_eq!(
+            read_back,
+            pattern(block as u8, 4096),
+            "Block {block} nach der Wiederaufnahme falsch"
+        );
+    }
+}
+
+#[test]
+fn the_progress_never_runs_ahead_of_the_blocks() {
+    // Die Zusage aus dem Kickoff: erst die Bloecke durable, dann der
+    // Fortschritt. Nach jedem Stapel muss alles unterhalb des Fortschritts
+    // wirklich dastehen — nicht nur als Zahl im Superblock.
+    let mut scratch = Scratch::new("reihenfolge");
+    let mut writer = build(&mut scratch, &[8 * BLOCK; 3], false);
+
+    for block in 0..8u64 {
+        writer
+            .write(0, block * BLOCK, &pattern(block as u8 + 3, 2048))
+            .unwrap();
+    }
+    writer.mark_member(0, MemberState::Stale, 0).unwrap();
+    let payload_offset = writer.member(0).unwrap().superblock().payload_offset;
+    writer
+        .member(0)
+        .unwrap()
+        .device()
+        .write_at(payload_offset, &vec![0u8; (8 * BLOCK) as usize])
+        .unwrap();
+
+    let mut rebuild = DiskRebuild::resume(&writer, 0).unwrap();
+    while rebuild.step(&mut writer, 3).unwrap() {
+        let member = writer.member(0).unwrap();
+        let done = if member.superblock().member_state == MemberState::Clean {
+            8
+        } else {
+            member.superblock().rebuild_progress / BLOCK
+        };
+        // Alles unterhalb des Fortschritts liegt roh auf der Platte — ohne
+        // Rekonstruktion, sonst prueft der Test sich selbst.
+        for block in 0..done {
+            let mut raw = vec![0u8; 2048];
+            member
+                .device()
+                .read_at(member.superblock().payload_offset + block * BLOCK, &mut raw)
+                .unwrap();
+            assert_eq!(
+                raw,
+                pattern(block as u8 + 3, 2048),
+                "Block {block} gilt als fertig, steht aber nicht auf der Platte"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_clean_member_has_nothing_to_rebuild() {
+    let mut scratch = Scratch::new("nichts-zu-tun");
+    let writer = build(&mut scratch, &[BLOCK; 2], false);
+    let rebuild = DiskRebuild::resume(&writer, 0).unwrap();
+    assert!(rebuild.is_complete());
+    assert_eq!(rebuild.remaining_blocks(), 0);
+}
+
+#[test]
+fn two_unusable_members_stop_the_reconstruction() {
+    // Mit P allein laesst sich genau ein fehlender Slot rekonstruieren. Bei
+    // zweien braeuchte es Q — das kann `parity/`, aber die Buchfuehrung
+    // darueber fehlt hier noch. Gemeldet statt geraten.
+    let mut scratch = Scratch::new("zwei-fehlen");
+    let mut writer = build(&mut scratch, &[BLOCK; 4], true);
+    writer.write(0, 0, &pattern(1, 1024)).unwrap();
+
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(2, MemberState::Stale, 0).unwrap();
+
+    assert!(matches!(
+        writer.read(1, 0, &mut [0u8; 1024]),
+        Err(EngineError::CannotRebuild { .. })
+    ));
+}
+
+#[test]
+fn a_write_to_a_not_yet_rebuilt_block_keeps_the_parity_right() {
+    // Der Fall, den ein Rebuild im laufenden Betrieb erzeugt: Ein Write geht
+    // auf einen Block, den der Member noch nicht zurueckbekommen hat. Sein
+    // alter Inhalt kommt dann aus der Paritaet — und muss so stimmig sein,
+    // dass eine spaetere Rekonstruktion wieder den neuen Inhalt liefert.
+    let mut scratch = Scratch::new("write-waehrend-rebuild");
+    let mut writer = build(&mut scratch, &[4 * BLOCK; 3], true);
+
+    for block in 0..4u64 {
+        writer
+            .write(1, block * BLOCK, &pattern(block as u8, 4096))
+            .unwrap();
+    }
+    // Halber Rebuild: die ersten zwei Bloecke gelten als fertig.
+    writer
+        .mark_member(1, MemberState::Rebuilding, 2 * BLOCK)
+        .unwrap();
+
+    // Ein Write auf Block 3 — jenseits des Fortschritts.
+    let fresh = pattern(0xD4, 4096);
+    writer.write(1, 3 * BLOCK, &fresh).unwrap();
+
+    // Der Rebuild holt den Block aus der Paritaet und muss den neuen Inhalt
+    // liefern, nicht den alten.
+    let mut rebuild = DiskRebuild::resume(&writer, 1).unwrap();
+    rebuild.run(&mut writer, 1).unwrap();
+
+    let mut read_back = vec![0u8; 4096];
+    writer.read(1, 3 * BLOCK, &mut read_back).unwrap();
+    assert_eq!(read_back, fresh, "der Write ging beim Rebuild verloren");
+    assert!(writer.verify_parity(0, (4 * BLOCK) as usize).unwrap());
 }
 
 // --- Grenzen --------------------------------------------------------------

@@ -68,8 +68,9 @@ Entwickler nie findet.
    das Format einmal vollständig durchgespielt — ohne Blockgerät. Ab hier darf
    Code Bytes auf eine echte Platte schreiben.
 2. **Paritäts-Engine.** Reed-Solomon P+Q, Gerätezugriff und das Write-Log auf
-   Platte, das ublk-Target und der Schreibpfad sind fertig; offen ist der
-   Rebuild auf Platte.
+   Platte, das ublk-Target, der Schreibpfad und der Rebuild sind fertig.
+   Offen bleibt der Write-Back-Modus — er braucht ein Gerät, dessen Flush
+   nachweislich ehrlich ist.
    **Braucht Linux** mit geladenem `ublk_drv`.
 3. **Crash-Harness.** `dm-flakey` und `dm-dust` für Lesefehler und stille
    Korruption, Power-Fail per `SIGKILL` an zufälligen Punkten im Schreibpfad,
@@ -99,7 +100,7 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität — 130 Tests grün (120 davon plattformunabhängig), dazu 9 auf Blockgeräten und 8 auf echten ublk-Geräten. Rebuild auf Platte offen |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion und Rebuild — 137 Tests grün (127 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |
