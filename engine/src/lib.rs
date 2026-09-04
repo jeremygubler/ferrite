@@ -39,6 +39,9 @@ pub mod flush;
 pub mod geometry;
 pub mod log_device;
 pub mod rebuild;
+/// Das ublk-Target. Braucht io_uring und gibt es deshalb nur auf Linux.
+#[cfg(target_os = "linux")]
+pub mod ublk;
 pub mod write_path;
 
 pub use array::{create_array, max_payload_size, open_array, ArraySpec, MemberSpec, OpenArray};

@@ -208,6 +208,42 @@ bleiben.
 - **Write** zuerst als Record ins Log. Bestätigt wird, sobald der Record durable
   ist — nicht früher und nicht später.
 
+> **Erledigt** in `engine/src/ublk/`, als Passthrough. Die Anbindung an Log und
+> Parität ist Aufgabe 4 — der `Target`-Trait ist die Naht dafür.
+>
+> **Die ersten Dependencies im Projekt**, und sie stehen ausschliesslich in
+> `engine/` unter `[target.'cfg(target_os = "linux")'.dependencies]`: `io-uring`
+> und `libc`. ublk spricht nur über io_uring, und weder `io_uring_setup` noch
+> `mmap` gibt es in `std`. Die Alternative wären Syscalls von Hand über Inline-
+> Assembler — ungeprüfter unsafe-Code an der heikelsten Stelle. `format/` und
+> `parity/` bleiben nach Regel 2 und 8 unberührt, `cargo test` läuft weiterhin
+> auf Windows.
+>
+> **`UBLK_F_USER_COPY` wird verlangt, nicht umgangen.** Ohne das Feature müssten
+> Writes über `UBLK_IO_NEED_GET_DATA` einen zweiten Umlauf machen — ein zweiter
+> Zustandsautomat, den auf dieser Maschine niemand ausführen könnte. Ungetesteter
+> Code im Schreibpfad ist schlimmer als eine Voraussetzung, die im Fehlerfall
+> klar benannt wird.
+>
+> **Die Zuordnung steht im Code**, wie verlangt: ein ublk-Gerät je Data-Member,
+> Offsets relativ zum Gerät, Umrechnung auf `payload_offset` im `Passthrough`.
+> Der Test `what_the_guest_writes_lands_in_the_payload_region` weist nach, dass
+> ein Write bei `payload_offset` landet und der Superblock-Bereich unberührt
+> bleibt.
+>
+> **Der Zweck der Übung ist bewiesen:** `btrfs_lives_on_a_ferrite_block_device`
+> legt ein btrfs auf `/dev/ublkbN` an, schreibt eine Datei, hängt aus, hängt
+> wieder ein und liest sie zurück — und prüft, dass die btrfs-Signatur bei
+> `payload_offset + 64 KiB` liegt und nicht am Plattenanfang.
+>
+> **Ein Fehler, den erst ein Test gefunden hat:** `UblkParams` ist 112 Bytes
+> gross, nicht 104 — die Struktur endet bei 108 und wird wegen ihrer
+> 8-Byte-Ausrichtung aufgefüllt. Der Wert geht als `len` an den Treiber. Mit 104
+> lief es trotzdem, weil der Kernel eine kürzere Länge toleriert; auf einem
+> Kernel, der es nicht tut, wäre es ein Fehlschlag ohne erkennbare Ursache
+> gewesen. Gefunden hat es der Test, der die von Hand geschriebenen Grössen
+> gegen `size_of::<T>()` stellt.
+
 ### 4 — Schreibpfad verdrahten
 
 `engine::WriteBatch` gibt die Reihenfolge vor, halte dich daran:

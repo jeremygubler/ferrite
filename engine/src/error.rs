@@ -59,6 +59,12 @@ pub enum EngineError {
         kind: std::io::ErrorKind,
         raw_os_error: Option<i32>,
     },
+    /// Der ublk-Treiber hat abgelehnt, oder eine Voraussetzung fehlt.
+    ///
+    /// `errno` ist positiv — der Treiber liefert seine Fehler negativ, und ein
+    /// Vorzeichen, das mal so und mal anders herum gilt, ist eine Fehlerquelle
+    /// fuer sich.
+    Ublk { what: &'static str, errno: i32 },
     /// Eine Regel aus `docs/FORMAT.md` wurde verletzt.
     Format(FormatError),
 }
@@ -123,6 +129,7 @@ impl fmt::Display for EngineError {
                 Some(code) => write!(f, "{what}: {kind:?} (errno {code})"),
                 None => write!(f, "{what}: {kind:?}"),
             },
+            Self::Ublk { what, errno } => write!(f, "ublk: {what} (errno {errno})"),
             Self::Format(error) => write!(f, "{error}"),
         }
     }

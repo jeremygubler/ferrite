@@ -1,13 +1,28 @@
 [package]
 name = "ferrite-engine"
-description = "Planung des Schreib- und Rebuild-Pfads. Reine Rechnung, die I/O-Schale kommt separat."
+description = "Planung des Schreib- und Rebuild-Pfads plus die I/O-Schale darum."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# Noch dependency-frei ausser dem Format. Das ublk-Target, das dieses Crate
-# spaeter benutzt, ist Linux-only und kommt hinter `#[cfg(target_os = "linux")]`
-# dazu — der Kern hier bleibt plattformunabhaengig und damit ueberall testbar.
 [dependencies]
 ferrite-format = { path = "../format" }
+
+# Die ersten fremden Crates im Projekt, und sie stehen bewusst nur hier.
+#
+# `ublk` spricht ausschliesslich ueber io_uring: weder `io_uring_setup` noch
+# `io_uring_enter`, `mmap` oder `ioctl` gibt es in `std`. Die Alternative waere,
+# diese Syscalls von Hand ueber Inline-Assembler zu machen — ungepruefter
+# unsafe-Code an der heikelsten Stelle eines Speicherprojekts. Der Aufwand
+# kaufte keine Sicherheit, sondern gaebe welche auf.
+#
+# Duenne Bindings, kein Framework: `io-uring` ist die Ring-Mechanik ohne
+# Async-Runtime, `libc` sind die Syscall-Deklarationen. Der Schreibpfad bleibt
+# vollstaendig in unserer Hand.
+#
+# Nur fuer Linux. `format/` und `parity/` bleiben nach Regel 2 und 8 unberuehrt,
+# und `cargo test` laeuft weiterhin ueberall — nur eben ohne ublk.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+libc = "0.2"

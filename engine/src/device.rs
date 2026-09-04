@@ -185,19 +185,19 @@ pub fn write_superblock(device: &MemberDevice, superblock: &Superblock) -> Resul
 // Form, die das ublk-Target spaeter braucht.
 
 #[cfg(unix)]
-fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
     file.read_exact_at(buffer, offset)
 }
 
 #[cfg(unix)]
-fn write_all_at(file: &File, offset: u64, data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_all_at(file: &File, offset: u64, data: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
     file.write_all_at(data, offset)
 }
 
 #[cfg(windows)]
-fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
     let mut done = 0usize;
     while done < buffer.len() {
@@ -217,7 +217,7 @@ fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result
 }
 
 #[cfg(windows)]
-fn write_all_at(file: &File, offset: u64, data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_all_at(file: &File, offset: u64, data: &[u8]) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
     let mut done = 0usize;
     while done < data.len() {
