@@ -121,20 +121,28 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Die dm-Targets liegen auf den Runnern im Extra-Paket.
+      # Die dm-Targets liegen auf den Runnern im Extra-Paket — jedenfalls die,
+      # die es hineingeschafft haben. `dm_flakey` ist dort, `dm_dust` nicht:
+      # Der Azure-Kernel baut es nicht mit. Deshalb wird `flakey` verlangt und
+      # `dust` nur gemeldet.
       #
-      # Der `grep` ist Absicht: Die Tests ueberspringen sich selbst, wenn ein
-      # Target fehlt — das ist auf einem Entwicklerrechner richtig, in CI aber
-      # waere es ein gruener Job ohne Nachweis.
+      # Verlangt wird bewusst mindestens eines: Die Tests ueberspringen sich
+      # selbst, wenn ein Target fehlt — das ist auf einem Entwicklerrechner
+      # richtig, in CI waere es sonst ein gruener Job ohne jeden Nachweis.
       - name: dm-Targets bereitstellen und pruefen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
-          sudo modprobe dm_dust
-          sudo modprobe dm_flakey
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe dm_flakey || true
+          sudo modprobe dm_dust || echo "Hinweis: dm_dust fehlt in diesem Kernel"
+          echo "Kernel: $(uname -r)"
           sudo dmsetup targets
-          sudo dmsetup targets | grep -q '^dust' || { echo "dm-dust fehlt"; exit 1; }
-          sudo dmsetup targets | grep -q '^flakey' || { echo "dm-flakey fehlt"; exit 1; }
+          sudo dmsetup targets | grep -q '^flakey' || { echo "dm-flakey fehlt — der Job haette nichts geprueft"; exit 1; }
+          if sudo dmsetup targets | grep -q '^dust'; then
+            echo "dm-dust vorhanden, die Lesefehler-Tests laufen mit"
+          else
+            echo "dm-dust fehlt: die Lesefehler-Tests ueberspringen sich, der Rest laeuft"
+          fi
 
       - name: Testbinary bauen
         run: cargo test -p ferrite-harness --test faulty_devices --no-run
