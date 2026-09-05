@@ -482,8 +482,27 @@ impl ArrayWriter {
     /// Replay wie jeder andere Bruch der Kette. Er wird nicht uebersprungen:
     /// Was danach kommt, gehoert zu einer Runde, deren Anfang fehlt.
     ///
-    /// Rueckgabe ist die Zahl der angewendeten Writes.
-    pub fn recover(&mut self, recovery: &crate::log_device::LogRecovery) -> Result<u64> {
+    /// # Absturz im degradierten Betrieb
+    ///
+    /// Ist ein Data-Member unbrauchbar, geht keines der beiden Verfahren:
+    /// Neurechnen braeuchte seinen Inhalt, Fortschreiben eine Paritaet, deren
+    /// Zustand nach dem Absturz niemand kennt. Fuer die Bereiche im Replay ist
+    /// sein Inhalt damit **verloren** — das ist keine Entscheidung dieser
+    /// Funktion, sondern der Stand der Dinge.
+    ///
+    /// Was hier entschieden wird, ist der Umgang damit: Die Paritaet wird neu
+    /// gebildet und der fehlende Slot dabei als Nullbytes eingesetzt. Das
+    /// Array bleibt oeffenbar, die uebrigen Members voll nutzbar — genau die
+    /// Eigenschaft, die dieses Projekt zusichert. Der Verlust wird begrenzt
+    /// (nur die Bereiche, die kein Checkpoint deckt), **definiert** (ein
+    /// spaeterer Rebuild liefert dort Nullen und keinen Muell) und in
+    /// [`Recovered::lost`] gemeldet.
+    ///
+    /// Die Alternative waere, das Oeffnen zu verweigern. Dann waere ein Array
+    /// mit einer ausgefallenen Platte nach einem Stromausfall vollstaendig
+    /// unbrauchbar, obwohl alle uebrigen Members unversehrt sind — und das
+    /// widerspraeche der Kerninvariante.
+    pub fn recover(&mut self, recovery: &crate::log_device::LogRecovery) -> Result<Recovered> {
         let mut applied = 0u64;
         let mut touched: Vec<(u64, usize)> = Vec::new();
 
@@ -514,7 +533,7 @@ impl ArrayWriter {
         }
 
         if applied == 0 {
-            return Ok(0);
+            return Ok(Recovered::default());
         }
         for member in &self.data {
             member.flush()?;
@@ -524,19 +543,62 @@ impl ArrayWriter {
         // sich zwei Bereiche, wird der gemeinsame Teil zweimal gerechnet — das
         // kostet Zeit und aendert nichts, weil Neurechnen keinen Vorzustand
         // braucht.
+        //
+        // Ging ein Write dabei auf einen unbrauchbaren Member, ist auch er
+        // verloren: Er steht zwar auf der Platte, aber ein Read auf einen
+        // solchen Member rekonstruiert — und die Paritaet sagt jetzt Null. Der
+        // Slot taucht deshalb in `lost` auf, ohne dass es einer Sonderregel
+        // beduerfte.
+        let mut lost = Vec::new();
         for (offset, len) in &touched {
-            let method = self.choose_method(BatchOrigin::Replay, *offset, *len)?;
-            match method {
-                ParityUpdate::Recompute => self.recompute_parity(*offset, *len)?,
-                // `required_parity_update` gibt nach einem Absturz nur
-                // `Recompute` oder einen Fehler zurueck. Kaeme hier etwas
-                // anderes, waere eine Annahme falsch — melden statt rechnen.
-                ParityUpdate::Incremental => return Err(EngineError::CannotUpdateParity),
+            for missing in self.recompute_parity_for_recovery(*offset, *len)? {
+                lost.push(LostRange {
+                    slot_index: missing,
+                    offset: *offset,
+                    len: *len,
+                });
             }
         }
 
         self.log.append_checkpoint()?;
-        Ok(applied)
+        Ok(Recovered { applied, lost })
+    }
+
+    /// Paritaet neu bilden und dabei unbrauchbare Slots als Nullbytes einsetzen.
+    ///
+    /// Liefert die Slots, deren Inhalt dabei verlorengegangen ist. Im gesunden
+    /// Fall ist die Liste leer und das Verhalten identisch mit
+    /// [`ArrayWriter::recompute_parity`].
+    fn recompute_parity_for_recovery(&self, offset: u64, len: usize) -> Result<Vec<u16>> {
+        let mut contents = Vec::with_capacity(self.data.len());
+        let mut lost = Vec::new();
+
+        for (index, member) in self.data.iter().enumerate() {
+            let mut buffer = vec![0u8; len];
+            if member.is_valid_over(offset, len, self.block_size_log2) {
+                member.read_extended(offset, &mut buffer)?;
+            } else {
+                // Nullen stehen lassen. Seinen tatsaechlichen Inhalt zu nehmen
+                // waere schlimmer: Er ist per Definition unbrauchbar, und eine
+                // Paritaet darueber liesse sich nie wieder aufloesen.
+                lost.push(index as u16);
+            }
+            contents.push(buffer);
+        }
+
+        let slots = build_slots(&contents)?;
+        let mut parity = vec![0u8; len];
+        compute_p(self.data_slot_count(), &slots, &mut parity).map_err(EngineError::from_parity)?;
+        self.parity_p.write_within(offset, &parity)?;
+        self.parity_p.flush()?;
+
+        if let Some(parity_q) = &self.parity_q {
+            compute_q(self.data_slot_count(), &slots, &mut parity)
+                .map_err(EngineError::from_parity)?;
+            parity_q.write_within(offset, &parity)?;
+            parity_q.flush()?;
+        }
+        Ok(lost)
     }
 
     // --- Rebuild ----------------------------------------------------------
@@ -716,7 +778,53 @@ impl ArrayWriter {
     ///
     /// Fuer Tests und spaeter fuer den Scrub. Nicht fuer den Schreibpfad — dort
     /// waere es eine Pruefung, die den Fehler erst nach dem Schreiben faende.
+    /// # Im degradierten Betrieb
+    ///
+    /// Fuer einen unbrauchbaren Slot ist `Dⱼ` nicht bekannt — sein Inhalt auf
+    /// der Platte gilt ja gerade nicht. Ein Vergleich damit beantwortet die
+    /// Frage nicht, sondern eine andere.
+    ///
+    /// Mit **P und Q** gibt es trotzdem eine echte Antwort: Der fehlende Slot
+    /// wird aus P rekonstruiert und das Ergebnis gegen Q geprueft. Das System
+    /// ist dann ueberbestimmt, und die Probe ist nicht tautologisch — sie
+    /// faende eine Paritaet, die zu sich selbst nicht passt.
+    ///
+    /// Fehlen zwei Slots oder gibt es kein Q, ist die Frage unbeantwortbar.
+    /// Dann kommt ein Fehler und kein geratenes `true`.
     pub fn verify_parity(&self, offset: u64, len: usize) -> Result<bool> {
+        let invalid: Vec<u16> = self
+            .data
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| !member.is_valid_over(offset, len, self.block_size_log2))
+            .map(|(index, _)| index as u16)
+            .collect();
+
+        match invalid.len() {
+            0 => self.verify_parity_healthy(offset, len),
+            1 if self.parity_q.is_some() => self.verify_parity_cross(invalid[0], offset, len),
+            _ => Err(EngineError::CannotRebuild { role: Role::Data }),
+        }
+    }
+
+    /// Die Kreuzprobe: fehlenden Slot aus P holen, Ergebnis gegen Q pruefen.
+    fn verify_parity_cross(&self, missing: u16, offset: u64, len: usize) -> Result<bool> {
+        let mut contents = self.read_all_data(offset, len)?;
+        let mut recovered = vec![0u8; len];
+        self.reconstruct(missing, offset, &mut recovered)?;
+        contents[usize::from(missing)] = recovered;
+
+        let slots = build_slots(&contents)?;
+        let mut expected = vec![0u8; len];
+        compute_q(self.data_slot_count(), &slots, &mut expected)
+            .map_err(EngineError::from_parity)?;
+
+        let mut found = vec![0u8; len];
+        self.read_parity_q(offset, &mut found)?;
+        Ok(expected == found)
+    }
+
+    fn verify_parity_healthy(&self, offset: u64, len: usize) -> Result<bool> {
         let contents = self.read_all_data(offset, len)?;
         let slots = build_slots(&contents)?;
 
@@ -860,4 +968,36 @@ fn checkpoint_before_parity() -> bool {
 #[cfg(not(all(target_os = "linux", feature = "crash-points")))]
 fn checkpoint_before_parity() -> bool {
     false
+}
+
+/// Ein Bereich, dessen Inhalt beim Recovery verlorengegangen ist.
+///
+/// Tritt nur auf, wenn ein Data-Member unbrauchbar war, als der Strom ausfiel.
+/// Dann ist sein Inhalt fuer die Bereiche im Replay nicht wiederherstellbar —
+/// die Paritaet, seine einzige Quelle, ist nach dem Absturz von unbekanntem
+/// Zustand. Gemeldet statt verschwiegen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LostRange {
+    pub slot_index: u16,
+    pub offset: u64,
+    pub len: usize,
+}
+
+/// Was ein Recovery ergeben hat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recovered {
+    /// Wieviele Writes aus dem Log angewendet wurden.
+    pub applied: u64,
+    /// Bereiche, deren Inhalt dabei verlorengegangen ist. Im gesunden Fall leer.
+    pub lost: Vec<LostRange>,
+}
+
+impl Recovered {
+    /// Ist beim Recovery etwas verlorengegangen?
+    ///
+    /// Als eigene Frage, damit ein Aufrufer sie stellen muss, statt sie zu
+    /// uebersehen.
+    pub fn had_loss(&self) -> bool {
+        !self.lost.is_empty()
+    }
 }

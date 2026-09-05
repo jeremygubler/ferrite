@@ -84,17 +84,32 @@ fn create(directory: &Path) -> Result<(), String> {
         .map_err(|error| format!("Notizdatei anlegen: {error}"))
 }
 
+/// Meldet, was ein Recovery ergeben hat.
+///
+/// Ein Verlust wird ausgegeben und nicht nur gezaehlt: Wer nach einem Absturz
+/// im degradierten Betrieb Daten einbuesst, soll erfahren welche.
+#[cfg(target_os = "linux")]
+fn report(recovered: &ferrite_engine::Recovered) {
+    if recovered.applied > 0 {
+        eprintln!("Recovery hat {} Writes angewendet", recovered.applied);
+    }
+    for lost in &recovered.lost {
+        eprintln!(
+            "  verloren: Slot {} bei Offset {} ueber {} Bytes",
+            lost.slot_index, lost.offset, lost.len
+        );
+    }
+}
+
 /// Fuehrt den Ablauf aus und stirbt unterwegs, wenn der Abbruchpunkt trifft.
 ///
 /// Gibt am Ende die Zahl der gezaehlten I/O-Operationen auf der Standardausgabe
 /// aus. Der Laeufer braucht sie, um zu wissen, wieviele Abbruchpunkte es gibt.
 #[cfg(target_os = "linux")]
 fn write(directory: &Path, count: u64) -> Result<(), String> {
-    let (mut writer, applied) =
+    let (mut writer, recovered) =
         ferrite_harness::open(directory).map_err(|error| format!("oeffnen: {error}"))?;
-    if applied > 0 {
-        eprintln!("Recovery hat {applied} Writes angewendet");
-    }
+    report(&recovered);
 
     let mut notes = std::fs::OpenOptions::new()
         .append(true)
@@ -151,11 +166,9 @@ fn degrade(directory: &Path, slot: u16) -> Result<(), String> {
 fn verify(directory: &Path) -> Result<(), String> {
     // Zusage 1: Das Array laesst sich oeffnen. `open` fuehrt dabei bereits das
     // Recovery aus — Schritt 5 aus Abschnitt 5.2.
-    let (writer, applied) =
+    let (writer, recovered) =
         ferrite_harness::open(directory).map_err(|error| format!("Zusage 1 verletzt: {error}"))?;
-    if applied > 0 {
-        eprintln!("Recovery hat {applied} Writes angewendet");
-    }
+    report(&recovered);
 
     // Zusage 2: Die Paritaet passt zum Inhalt der Data-Members, ueber die
     // gesamte Payload-Region.
@@ -181,6 +194,7 @@ fn verify(directory: &Path) -> Result<(), String> {
     // wird von hinten nach vorn geprueft und jede Stelle nur einmal.
     let full_plan = plan(confirmed.iter().copied().max().map_or(0, |last| last + 1));
     let mut seen: Vec<(u16, u64, usize)> = Vec::new();
+    let mut skipped = 0usize;
 
     for nth in confirmed.iter().rev() {
         let write = &full_plan[*nth as usize];
@@ -189,6 +203,20 @@ fn verify(directory: &Path) -> Result<(), String> {
             continue;
         }
         seen.push(range);
+
+        // Was das Recovery als verloren gemeldet hat, ist verloren — und zwar
+        // unvermeidbar: Ein Absturz im degradierten Betrieb laesst die
+        // Paritaet in unbekanntem Zustand, und sie war die einzige Quelle fuer
+        // den fehlenden Member. Der Verlust wird hier **uebersprungen und
+        // gezaehlt**, nicht stillschweigend hingenommen.
+        if recovered
+            .lost
+            .iter()
+            .any(|lost| overlaps((lost.slot_index, lost.offset, lost.len), range))
+        {
+            skipped += 1;
+            continue;
+        }
 
         let mut read_back = vec![0u8; write.data.len()];
         writer
@@ -202,7 +230,14 @@ fn verify(directory: &Path) -> Result<(), String> {
         }
     }
 
-    println!("ok {} bestaetigte Writes geprueft", confirmed.len());
+    if skipped > 0 {
+        println!(
+            "ok {} bestaetigte Writes geprueft, {skipped} durch gemeldeten Verlust uebersprungen",
+            confirmed.len()
+        );
+    } else {
+        println!("ok {} bestaetigte Writes geprueft", confirmed.len());
+    }
     Ok(())
 }
 

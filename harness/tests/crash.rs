@@ -280,13 +280,21 @@ fn the_harness_notices_a_checkpoint_written_too_early() {
 /// Ein Member ist ausgefallen, der Schreibpfad laeuft weiter — und dann faellt
 /// der Strom aus. Beim Recovery ist Neurechnen unmoeglich (der fehlende Member
 /// liesse sich nicht lesen) und Fortschreiben ebenfalls (nach dem Absturz ist
-/// unbekannt, ob die Paritaet zum alten oder neuen Inhalt gehoert).
+/// unbekannt, ob die Paritaet zum alten oder neuen Inhalt gehoert). Der Inhalt
+/// des fehlenden Members ist fuer diese Bereiche verloren, und daran laesst
+/// sich nichts aendern.
 ///
-/// `required_parity_update` gibt dafuer `CannotUpdateParity` zurueck. Dieser
-/// Test haelt fest, **was das in der Praxis bedeutet** — nicht als Zusage,
-/// sondern als Befund fuer die Entscheidung, die noch aussteht.
+/// Die Entscheidung ist, den Verlust **einzugrenzen statt das Array
+/// aufzugeben**: Die Paritaet wird neu gebildet, der fehlende Slot zaehlt dabei
+/// als Nullbytes, und `recover` meldet die betroffenen Bereiche. Das Array
+/// bleibt oeffenbar und die uebrigen Members voll nutzbar — genau die
+/// Eigenschaft, die dieses Projekt zusichert.
+///
+/// Die Alternative waere gewesen, das Oeffnen zu verweigern. Dann waere ein
+/// Array mit einer ausgefallenen Platte nach einem Stromausfall vollstaendig
+/// unbrauchbar, obwohl alle uebrigen Members unversehrt sind.
 #[test]
-fn a_crash_while_degraded_is_measured_and_not_guessed() {
+fn a_crash_while_degraded_loses_only_what_it_must_and_says_so() {
     let workspace = Workspace::new("degradiert");
     let array = workspace.path().join("array");
     let pristine = workspace.path().join("frisch");
@@ -309,9 +317,9 @@ fn a_crash_while_degraded_is_measured_and_not_guessed() {
     );
     let points: u64 = counted.stdout.parse().expect("Zahl der I/O-Punkte");
 
-    let mut openable = 0u64;
-    let mut refused = 0u64;
-    let mut other = Vec::new();
+    let mut with_recovery = 0u64;
+    let mut with_loss = 0u64;
+    let mut failures = Vec::new();
 
     for at in 1..=points {
         copy_dir(&pristine, &array);
@@ -321,37 +329,39 @@ fn a_crash_while_degraded_is_measured_and_not_guessed() {
         }
 
         let verified = run_worker("verify", &array, &[], None);
-        if verified.status == Some(0) {
-            openable += 1;
-        } else if verified
-            .stderr
-            .contains("weder neu rechenbar noch fortschreibbar")
-        {
-            refused += 1;
-        } else {
-            other.push((at, verified.stderr.clone()));
+        if verified.stderr.contains("angewendet") {
+            with_recovery += 1;
+        }
+        if verified.stderr.contains("verloren") {
+            with_loss += 1;
+        }
+        if verified.status != Some(0) {
+            failures.push((at, verified.stderr.clone()));
         }
     }
 
     eprintln!(
-        "Absturz im degradierten Betrieb: {openable} von {points} Punkten kamen durch, \
-         {refused} endeten in CannotUpdateParity, {} in etwas anderem",
-        other.len()
+        "Absturz im degradierten Betrieb: {points} Punkte, {with_recovery} mit Recovery, \
+         {with_loss} davon mit gemeldetem Verlust"
     );
-    for (at, message) in other.iter().take(3) {
-        eprintln!("  Punkt {at}: {message}");
-    }
 
-    // Kein `assert` auf das Ergebnis: Was hier herauskommt, ist der Befund,
-    // aus dem die Entscheidung folgt, und keine Zusage, die schon gaelte.
-    // Festgehalten wird nur, dass der Lauf ueberhaupt etwas gemessen hat —
-    // ein Test, der still null Punkte prueft, waere wertlos.
     assert!(
-        openable + refused + other.len() as u64 > 0,
-        "kein einziger Abbruchpunkt wurde ausgewertet"
+        failures.is_empty(),
+        "das Array liess sich an {} von {points} Punkten nicht oeffnen: {:?}",
+        failures.len(),
+        failures.iter().take(3).collect::<Vec<_>>()
     );
+
+    // Ohne diese beiden Zeilen waere der Test gruen, wenn das Recovery gar
+    // nicht erst liefe — und genau das war er einmal, verdeckt von einem
+    // Fehler im Log.
     assert!(
-        other.is_empty(),
-        "unerwartete Fehler jenseits von CannotUpdateParity: {other:?}"
+        with_recovery > 0,
+        "an keinem Punkt lief ein Recovery — der Test hat den Fall nicht erreicht"
+    );
+    assert_eq!(
+        with_loss, with_recovery,
+        "ein Recovery im degradierten Betrieb ohne gemeldeten Verlust: \
+         entweder ist der Verlust nicht eingetreten, oder er wird verschwiegen"
     );
 }

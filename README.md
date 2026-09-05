@@ -87,11 +87,14 @@ Entwickler nie findet.
    Bytes. Ein Lesefehler wird aus der Parität beantwortet, ein Gerät, das seinen
    Flush belogen hat, hinterlässt eine veraltete Parität — und der Scrub findet
    sie. Bit-Rot wird gefunden und aus der Parität repariert.
-   Ein Fall wartet hier ebenfalls noch: **Absturz im degradierten Betrieb.**
-   Neurechnen der Parität scheitert am fehlenden Member, Fortschreiben am nach
-   dem Absturz unzuverlässigen alten Inhalt. `engine` gibt dafür bewusst einen
-   Fehler (`CannotUpdateParity`) statt einer geratenen Antwort — was stattdessen
-   passieren soll, entscheidet dieses Harness.
+   **Absturz im degradierten Betrieb** ist entschieden und gemessen:
+   Neurechnen scheitert am fehlenden Member, Fortschreiben an der nach dem
+   Absturz unbestimmbaren Parität — der Inhalt des fehlenden Members ist für
+   diese Bereiche verloren. Ferrite gibt deshalb nicht das ganze Array auf,
+   sondern grenzt den Verlust ein: Die Parität wird neu gebildet, der fehlende
+   Slot zählt als Nullbytes, und `recover` meldet die betroffenen Bereiche. Das
+   Array bleibt offen, die übrigen Members voll nutzbar. Gemessen an allen 80
+   Abbruchpunkten: 64 mit Recovery, 64 davon mit gemeldetem Verlust.
 4. **Repair-Broker.** btrfs-EIO abfangen, rekonstruieren, zurückschreiben.
 5. **Pool-Namespace.** FUSE-Passthrough, Share-Policies.
 6. **Control plane und UI.**
@@ -111,7 +114,7 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion und Rebuild — 137 Tests grün (127 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion, Rebuild und Recovery — 139 Tests grün (129 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 4 Tests in CI. Dazu 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`), ebenfalls in CI, mit Root |
 | `broker/` | offen |
 | `pool/` | offen |

@@ -37,7 +37,8 @@
 use std::path::{Path, PathBuf};
 
 use ferrite_engine::{
-    member_for, write_superblock, ArrayWriter, DeviceLog, EngineError, Member, MemberDevice, Result,
+    member_for, write_superblock, ArrayWriter, DeviceLog, EngineError, Member, MemberDevice,
+    Recovered, Result,
 };
 use ferrite_format::superblock::{Role, Superblock, DEFAULT_PAYLOAD_OFFSET};
 use ferrite_format::Uuid;
@@ -148,12 +149,12 @@ pub fn create(directory: &Path) -> Result<()> {
 /// Gibt den Schreibpfad und die Zahl der beim Recovery angewendeten Writes
 /// zurueck. Die Superbloecke kommen von der Platte — nach einem Absturz ist
 /// das das Einzige, was noch da ist.
-pub fn open(directory: &Path) -> Result<(ArrayWriter, u64)> {
+pub fn open(directory: &Path) -> Result<(ArrayWriter, Recovered)> {
     open_on(&member_files(directory))
 }
 
 /// Oeffnet ein Array auf den angegebenen Geraeten und spielt das Log zurueck.
-pub fn open_on(files: &[PathBuf]) -> Result<(ArrayWriter, u64)> {
+pub fn open_on(files: &[PathBuf]) -> Result<(ArrayWriter, Recovered)> {
     let log_device = MemberDevice::open(&files[usize::from(SLOTS) + 2])?;
     let log_superblock = ferrite_engine::read_superblock(&log_device)?;
     let (log, recovery) = DeviceLog::open(log_device, &log_superblock)?;
@@ -175,8 +176,8 @@ pub fn open_on(files: &[PathBuf]) -> Result<(ArrayWriter, u64)> {
     let parity_q = member_for(q_device, &q_superblock, Role::ParityQ)?;
 
     let mut writer = ArrayWriter::new(log, data?, parity_p, Some(parity_q))?;
-    let applied = writer.recover(&recovery)?;
-    Ok((writer, applied))
+    let recovered = writer.recover(&recovery)?;
+    Ok((writer, recovered))
 }
 
 /// Ein Write, den der Arbeiter ausfuehrt.
