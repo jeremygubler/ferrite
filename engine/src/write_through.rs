@@ -503,6 +503,13 @@ impl ArrayWriter {
     /// unbrauchbar, obwohl alle uebrigen Members unversehrt sind — und das
     /// widerspraeche der Kerninvariante.
     pub fn recover(&mut self, recovery: &crate::log_device::LogRecovery) -> Result<Recovered> {
+        // Zuerst die verworfene Runde wegraeumen, falls die Kette gebrochen
+        // war. Sie muss weg, **bevor** das Log weiterschreibt: Der naechste
+        // Record schloesse sonst die Luecke, und die alten Records passten
+        // wieder in die Kette. Ein spaeterer Replay wendete sie dann an — alte
+        // Writes ueberschrieben neuere Daten, lautlos.
+        self.log.discard_after_break(recovery)?;
+
         let mut applied = 0u64;
         let mut touched: Vec<(u64, usize)> = Vec::new();
 

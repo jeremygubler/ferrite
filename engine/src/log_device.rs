@@ -63,6 +63,11 @@ pub struct LogRecovery {
     /// Warum der Replay aufgehoert hat.
     pub stop: Option<ReplayStop>,
     pub accepted: u64,
+    /// Offsets der Record-Header, die nach einem Kettenbruch verworfen wurden.
+    ///
+    /// Leer, wenn der Replay sauber zu Ende kam — dann gibt es nichts
+    /// wegzuraeumen, und wer es trotzdem taete, loeschte gueltige Records.
+    discarded: Vec<usize>,
 }
 
 impl LogRecovery {
@@ -132,9 +137,11 @@ impl DeviceLog {
         let mut head = 0;
         let mut next_seq = 1;
         let mut accepted = 0;
+        let mut first_accepted = None;
         for record in replay.by_ref() {
             let plan = plan_append(log.region_len, record.offset, &record.header)
                 .map_err(EngineError::Format)?;
+            first_accepted.get_or_insert(record.offset);
             head = plan.next_head;
             next_seq = record.header.seq.saturating_add(1);
             accepted += 1;
@@ -142,6 +149,35 @@ impl DeviceLog {
 
         // Vor dem Verschieben von `region` abfragen: `replay` leiht sie noch.
         let stop = replay.stop();
+
+        // Nach einem Bruch liegt hinter dem Kopf eine verworfene Runde. Sie
+        // dort liegen zu lassen ist gefaehrlich: Der naechste Record schliesst
+        // die Luecke, und dann passen die alten Records **wieder** in die
+        // Kette. Ein spaeterer Replay wendet sie an — alte Writes
+        // ueberschreiben neuere Daten, und niemand merkt es.
+        //
+        // `RingExhausted` ist kein Bruch: Da ist der Replay sauber zu Ende
+        // gekommen, und wer dort aufraeumte, loeschte gueltige Records.
+        // Weggeraeumt werden **nur die Header** der verworfenen Records, nicht
+        // die ganze Spanne. Ein Record ohne gueltigen Header landet nie wieder
+        // in einer Kette, und ein Sektor je Record ist billig — die Spanne zu
+        // nullen koennte bei einem grossen Log-Member Gigabytes bedeuten.
+        //
+        // Dass die Liste leer bleibt, wenn dort ohnehin nichts liegt, ist der
+        // zweite Grund fuer diese Form: Ein `NoHeader` am leeren Ende des Logs
+        // ist kein Bruch, sondern der Normalfall, und es sieht genauso aus.
+        let keep = match ring.newest_checkpoint() {
+            Some((sector, _)) => Some(sector * LOG_SECTOR_SIZE),
+            None => first_accepted,
+        };
+        let discarded: Vec<usize> = match stop {
+            Some(ReplayStop::RingExhausted) | None => Vec::new(),
+            Some(_) => ring
+                .scan()
+                .map(|(sector, _)| sector * LOG_SECTOR_SIZE)
+                .filter(|offset| is_discarded(*offset, head, keep))
+                .collect(),
+        };
 
         if accepted == 0 {
             // `Padding` bleibt aussen vor: Es nimmt an der Kette nicht teil und
@@ -176,6 +212,7 @@ impl DeviceLog {
                 next_seq,
                 stop,
                 accepted,
+                discarded,
             }),
         ))
     }
@@ -225,6 +262,34 @@ impl DeviceLog {
 
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// Raeumt eine nach einem Kettenbruch verworfene Runde weg.
+    ///
+    /// Gibt zurueck, ob etwas geloescht wurde. Ohne Bruch passiert nichts —
+    /// dort laegen gueltige Records.
+    ///
+    /// **Muss laufen, bevor das Log weiterschreibt.** Sonst schliesst der
+    /// naechste Record die Luecke, die alten Records passen wieder in die
+    /// Kette, und ein spaeterer Replay wendet sie an. Das ist der Grund,
+    /// warum diese Funktion existiert; sie ist keine Kosmetik.
+    ///
+    /// Sie steht nicht in `open`, weil das Oeffnen auch nur lesend passieren
+    /// koennen soll — ein Diagnosewerkzeug soll nichts veraendern.
+    ///
+    /// Kostet einen Schreibvorgang je verworfenem Record plus einen `flush`.
+    /// Im Crash-Harness verlaengert das den Lauf spuerbar, weil dort fast jeder
+    /// Abbruchpunkt einen Bruch erzeugt. Im Betrieb passiert es einmal nach
+    /// einem Absturz — und ein stiller Datenverlust waere teurer.
+    pub fn discard_after_break(&mut self, recovery: &LogRecovery) -> Result<bool> {
+        if recovery.discarded.is_empty() {
+            return Ok(false);
+        }
+        for offset in &recovery.discarded {
+            self.zero_range(*offset, LOG_SECTOR_SIZE)?;
+        }
+        self.device.flush()?;
+        Ok(true)
     }
 
     pub fn region_len(&self) -> usize {
@@ -330,5 +395,61 @@ impl DeviceLog {
             done += chunk;
         }
         Ok(())
+    }
+}
+
+/// Liegt dieser Offset im verworfenen Teil des Ringpuffers?
+///
+/// Behalten wird der Bereich `keep .. head` im Ring — dort liegen der
+/// Checkpoint, der den naechsten Replay startet, und die akzeptierten Records.
+/// Alles andere gehoert zu einer Runde, die der Bruch verworfen hat.
+///
+/// `keep == None` heisst: Es gibt nichts zu behalten, der ganze Ring ist
+/// verworfen. `keep == Some(head)` heisst das Gegenteil — der Ring ist voll mit
+/// Behaltenem, und nichts ist wegzuraeumen.
+fn is_discarded(offset: usize, head: usize, keep: Option<usize>) -> bool {
+    match keep {
+        None => true,
+        Some(keep) if keep == head => false,
+        Some(keep) if head < keep => offset >= head && offset < keep,
+        // Der behaltene Bereich laeuft ueber das Ende des Rings hinweg.
+        Some(keep) => offset >= head || offset < keep,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_discarded;
+
+    #[test]
+    fn nothing_to_keep_discards_everything() {
+        assert!(is_discarded(0, 0, None));
+        assert!(is_discarded(4096, 0, None));
+    }
+
+    #[test]
+    fn a_full_ring_of_kept_records_discards_nothing() {
+        assert!(!is_discarded(0, 8192, Some(8192)));
+        assert!(!is_discarded(4096, 8192, Some(8192)));
+    }
+
+    #[test]
+    fn the_span_between_head_and_keep_is_discarded() {
+        // Behalten laeuft von 12288 bis zum Kopf bei 4096, also ueber das Ende
+        // hinweg. Verworfen ist genau das dazwischen: 4096 und 8192.
+        assert!(is_discarded(4096, 4096, Some(12288)));
+        assert!(is_discarded(8192, 4096, Some(12288)));
+        assert!(!is_discarded(12288, 4096, Some(12288)));
+        assert!(!is_discarded(0, 4096, Some(12288)));
+    }
+
+    #[test]
+    fn a_span_wrapping_around_the_end_is_handled() {
+        // Behalten laeuft ueber das Ende: keep bei 4096, Kopf bei 12288.
+        // Verworfen ist damit 12288.. und ..4096.
+        assert!(is_discarded(12288, 12288, Some(4096)));
+        assert!(is_discarded(0, 12288, Some(4096)));
+        assert!(!is_discarded(4096, 12288, Some(4096)));
+        assert!(!is_discarded(8192, 12288, Some(4096)));
     }
 }

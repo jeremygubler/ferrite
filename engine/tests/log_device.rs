@@ -468,3 +468,88 @@ fn a_record_written_after_a_checkpoint_is_replayed() {
         "der Record nach dem Checkpoint wurde nicht wiedergefunden"
     );
 }
+
+// --- Wiederbelebung nach einem Kettenbruch -------------------------------
+
+#[test]
+fn records_of_a_discarded_round_do_not_come_back() {
+    // Nach einem torn write bricht die Kette, und alles danach ist verworfen
+    // (Abschnitt 5.2, Schritt 4). Die Records liegen aber weiter im Ringpuffer.
+    //
+    // Schreibt das Log danach weiter, landet der neue Record genau in der
+    // Luecke — und mit ihm passen die verworfenen Records **wieder** in die
+    // Kette. Ein spaeterer Replay wendet sie an: alte Writes ueberschreiben
+    // neuere Daten, lautlos.
+    //
+    // Faellt dieser Test, ist genau das der Fall.
+    let scratch = Scratch::new("wiederbelebung");
+    {
+        let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
+        for nth in 0..4u8 {
+            log.append_write(0, nth as u64 * 4096, &payload(nth, 64))
+                .unwrap();
+        }
+    }
+
+    // Den zweiten Record zerstoeren — ein torn write sieht so aus.
+    {
+        let device = scratch.open();
+        device
+            .write_at(
+                DEFAULT_PAYLOAD_OFFSET + LOG_SECTOR_SIZE as u64,
+                &[0xFFu8; 64],
+            )
+            .unwrap();
+        device.flush().unwrap();
+    }
+
+    // Oeffnen: Nur der erste Record wird akzeptiert, dann bricht die Kette.
+    {
+        let (mut log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+        assert_eq!(recovery.accepted, 1, "nur der erste Record zaehlt");
+        assert!(recovery.stop.is_some(), "die Kette muss gebrochen sein");
+
+        // Der Schreibpfad raeumt die verworfene Runde weg, bevor er
+        // weiterschreibt.
+        log.discard_after_break(&recovery).unwrap();
+        log.append_write(1, 12345, &payload(0xAB, 64)).unwrap();
+    }
+
+    // Und jetzt die Frage: Was findet der naechste Replay?
+    let (_, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    let found: Vec<(u64, u16)> = recovery
+        .records()
+        .unwrap()
+        .map(|record| (record.header.seq, record.header.slot_index))
+        .collect();
+
+    assert_eq!(
+        found,
+        vec![(1, 0), (2, 1)],
+        "verworfene Records sind wieder in der Kette aufgetaucht"
+    );
+}
+
+#[test]
+fn a_clean_end_of_the_ring_is_not_discarded() {
+    // `RingExhausted` ist kein Bruch: Der Replay ist am Ende angekommen, alles
+    // ist in Ordnung. Wer hier aufraeumte, loeschte gueltige Records.
+    let scratch = Scratch::new("kein-bruch");
+    {
+        let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
+        for nth in 0..3u8 {
+            log.append_write(0, nth as u64 * 4096, &payload(nth, 64))
+                .unwrap();
+        }
+    }
+
+    let (mut log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    assert_eq!(recovery.accepted, 3);
+    assert!(
+        !log.discard_after_break(&recovery).unwrap(),
+        "ohne Bruch darf nichts geloescht werden"
+    );
+
+    let (_, again) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    assert_eq!(again.accepted, 3, "die Records sind noch da");
+}
