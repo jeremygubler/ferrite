@@ -11,10 +11,11 @@ Bit-Rot, atomare Updates. Läuft bare metal wie virtualisiert.
 > nichts miteinander zu tun. Seit Meilenstein 2 stellt Ferrite je Data-Member
 > ein Blockgerät bereit, btrfs läuft darauf, und jeder Write geht durch Log und
 > Parität. Der Absturz an jedem einzelnen I/O-Punkt des Schreibpfads läuft seit
-> Meilenstein 3 in CI. **Trotzdem: Lege nichts darauf ab, wovon du nur eine
-> Kopie hast.** Was der Nachweis noch nicht abdeckt, sind Lesefehler, stille
-> Korruption und halb geschriebene Sektoren auf echter Hardware — und ohne die
-> ist keine Zusage über Dauerhaftigkeit vollständig gedeckt.
+> Meilenstein 3 in CI, ebenso Lesefehler, verschluckte Writes und Bit-Rot über
+> `dm-dust` und `dm-flakey`. **Trotzdem: Lege nichts darauf ab, wovon du nur
+> eine Kopie hast.** Was fehlt, ist Betrieb auf echter Hardware über längere
+> Zeit — und ein Speichersystem, das noch niemand im Alltag benutzt hat, hat
+> seine unangenehmen Überraschungen noch vor sich.
 
 ## Warum
 
@@ -81,9 +82,11 @@ Entwickler nie findet.
    Data-Members, und kein bestätigter Write fehlt. Ein Selbsttest weist nach,
    dass das Harness einen bekannten Fehler wirklich bemerkt — ein Harness, das
    immer grün ist, wäre eine Behauptung.
-   Offen sind `dm-flakey` und `dm-dust` für Lesefehler, stille Korruption und
-   halb geschriebene Sektoren — das ist die Lücke, die ein `SIGKILL` zwischen
-   zwei Operationen nicht abdeckt.
+   Dazu kommt, was ein `SIGKILL` zwischen zwei Operationen nicht abdeckt:
+   `dm-dust` erzeugt Lesefehler, `dm-flakey` verschluckt Writes oder verfälscht
+   Bytes. Ein Lesefehler wird aus der Parität beantwortet, ein Gerät, das seinen
+   Flush belogen hat, hinterlässt eine veraltete Parität — und der Scrub findet
+   sie. Bit-Rot wird gefunden und aus der Parität repariert.
    Ein Fall wartet hier ebenfalls noch: **Absturz im degradierten Betrieb.**
    Neurechnen der Parität scheitert am fehlenden Member, Fortschreiben am nach
    dem Absturz unzuverlässigen alten Inhalt. `engine` gibt dafür bewusst einen
@@ -109,7 +112,7 @@ von Anfang an mitläuft.
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
 | `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion und Rebuild — 137 Tests grün (127 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
-| `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 4 Tests, in CI |
+| `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 4 Tests in CI. Dazu 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`), ebenfalls in CI, mit Root |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |

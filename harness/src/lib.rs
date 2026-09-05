@@ -37,7 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use ferrite_engine::{
-    member_for, ArrayWriter, DeviceLog, EngineError, Member, MemberDevice, Result,
+    member_for, write_superblock, ArrayWriter, DeviceLog, EngineError, Member, MemberDevice, Result,
 };
 use ferrite_format::superblock::{Role, Superblock, DEFAULT_PAYLOAD_OFFSET};
 use ferrite_format::Uuid;
@@ -89,6 +89,31 @@ fn superblock(role: Role, slot_index: u16, payload: u64) -> Superblock {
 ///
 /// Danach steht ein leeres, gueltiges Array auf der Platte: Superbloecke
 /// geschrieben, Log-Region genullt, Paritaet passend (alles null).
+/// Legt ein Array auf den angegebenen Geraeten an.
+///
+/// Die Reihenfolge ist die von [`member_files`]: Data 0..n, P, Q, Log. Die
+/// Geraete muessen bereits die noetige Groesse haben — hier wird nichts mehr
+/// angelegt, denn ein `/dev/mapper`-Eintrag laesst sich nicht `set_len`.
+pub fn create_on(paths: &[PathBuf]) -> Result<()> {
+    for (index, path) in paths.iter().enumerate() {
+        let device = MemberDevice::open(path)?;
+        let superblock = match index {
+            index if index < usize::from(SLOTS) => superblock(Role::Data, index as u16, PAYLOAD),
+            index if index == usize::from(SLOTS) => superblock(Role::ParityP, 0, PAYLOAD),
+            index if index == usize::from(SLOTS) + 1 => superblock(Role::ParityQ, 0, PAYLOAD),
+            _ => superblock(Role::Log, 0, LOG_PAYLOAD),
+        };
+        write_superblock(&device, &superblock)?;
+    }
+
+    // Die Log-Region nullen, sonst faende der erste Scan, was das Geraet
+    // vorher trug.
+    let log_device = MemberDevice::open(&paths[usize::from(SLOTS) + 2])?;
+    DeviceLog::initialize(log_device, &superblock(Role::Log, 0, LOG_PAYLOAD))?;
+    Ok(())
+}
+
+/// Legt die Geraetedateien in einem Verzeichnis an und initialisiert das Array.
 pub fn create(directory: &Path) -> Result<()> {
     std::fs::create_dir_all(directory).map_err(|error| EngineError::Io {
         what: "Verzeichnis anlegen",
@@ -115,23 +140,7 @@ pub fn create(directory: &Path) -> Result<()> {
             })?;
     }
 
-    let files = member_files(directory);
-    for (index, path) in files.iter().enumerate() {
-        let device = MemberDevice::open(path)?;
-        let superblock = match index {
-            index if index < usize::from(SLOTS) => superblock(Role::Data, index as u16, PAYLOAD),
-            index if index == usize::from(SLOTS) => superblock(Role::ParityP, 0, PAYLOAD),
-            index if index == usize::from(SLOTS) + 1 => superblock(Role::ParityQ, 0, PAYLOAD),
-            _ => superblock(Role::Log, 0, LOG_PAYLOAD),
-        };
-        ferrite_engine::write_superblock(&device, &superblock)?;
-    }
-
-    // Die Log-Region nullen, sonst faende der erste Scan, was die Datei
-    // vorher trug.
-    let log_device = MemberDevice::open(&files[usize::from(SLOTS) + 2])?;
-    DeviceLog::initialize(log_device, &superblock(Role::Log, 0, LOG_PAYLOAD))?;
-    Ok(())
+    create_on(&member_files(directory))
 }
 
 /// Oeffnet das Array und spielt das Log zurueck.
@@ -140,8 +149,11 @@ pub fn create(directory: &Path) -> Result<()> {
 /// zurueck. Die Superbloecke kommen von der Platte — nach einem Absturz ist
 /// das das Einzige, was noch da ist.
 pub fn open(directory: &Path) -> Result<(ArrayWriter, u64)> {
-    let files = member_files(directory);
+    open_on(&member_files(directory))
+}
 
+/// Oeffnet ein Array auf den angegebenen Geraeten und spielt das Log zurueck.
+pub fn open_on(files: &[PathBuf]) -> Result<(ArrayWriter, u64)> {
     let log_device = MemberDevice::open(&files[usize::from(SLOTS) + 2])?;
     let log_superblock = ferrite_engine::read_superblock(&log_device)?;
     let (log, recovery) = DeviceLog::open(log_device, &log_superblock)?;

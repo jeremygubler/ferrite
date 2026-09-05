@@ -306,7 +306,33 @@ impl ArrayWriter {
         self.check_within(member, offset, buffer.len())?;
 
         if member.is_valid_over(offset, buffer.len(), self.block_size_log2) {
-            return member.read_extended(offset, buffer);
+            return match member.read_extended(offset, buffer) {
+                Ok(()) => Ok(()),
+                // Die Platte ist noch da, dieser Block gibt aber nichts mehr
+                // her. Genau dafuer gibt es die Paritaet — der Aufrufer soll
+                // seinen Inhalt bekommen und nicht einen Fehler.
+                //
+                // Nur bei einem Fehler des Betriebssystems. Ein `BeyondDevice`
+                // ist ein Programmierfehler, und den mit einer Rekonstruktion
+                // zu beantworten hiesse, ihn zu verstecken.
+                Err(EngineError::Io {
+                    what,
+                    kind,
+                    raw_os_error,
+                }) => {
+                    let cause = EngineError::Io {
+                        what,
+                        kind,
+                        raw_os_error,
+                    };
+                    // Scheitert auch die Rettung, wird der Lesefehler gemeldet
+                    // und nicht ihr eigener Fehler: Er ist die Ursache, und der
+                    // Aufrufer soll erfahren, welche Platte klemmt.
+                    self.reconstruct(slot_index, offset, buffer)
+                        .map_err(|_| cause)
+                }
+                Err(other) => Err(other),
+            };
         }
         self.reconstruct(slot_index, offset, buffer)
     }
@@ -666,6 +692,24 @@ impl ArrayWriter {
             contents.push(buffer);
         }
         Ok(contents)
+    }
+
+    /// Bildet die Paritaet fuer einen Bereich aus den Data-Members neu.
+    ///
+    /// Die Antwort auf einen Scrub-Befund, bei dem die Data-Members unversehrt
+    /// sind und nur die Paritaet nicht mehr passt — etwa nach einem Geraet, das
+    /// Writes verschluckt hat (Abschnitt 5.3).
+    ///
+    /// **Nur brauchbar, solange alle Data-Slots gueltige Daten liefern.** Ist
+    /// einer degradiert, gaebe das Neubilden eine Paritaet ueber seinen
+    /// unbrauchbaren Inhalt — und danach liesse sich nichts mehr
+    /// rekonstruieren. Deshalb wird das hier geprueft und nicht dem Aufrufer
+    /// ueberlassen.
+    pub fn rebuild_parity(&mut self, offset: u64, len: usize) -> Result<()> {
+        if self.sources_at(offset, len) != SourceState::AllValid {
+            return Err(EngineError::CannotUpdateParity);
+        }
+        self.recompute_parity(offset, len)
     }
 
     /// Prueft, dass die Paritaet zum Inhalt der Data-Members passt.
