@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Baut die Abbruchpunkte fuer das Crash-Harness ein. Standardmaessig aus: Eine
+# Selbstmordfunktion im Schreibpfad gehoert nicht in einen Produktionsbau.
+crash-points = []
+
 [dependencies]
 ferrite-format = { path = "../format" }
 # Reine Rechnung ohne I/O und ohne eigene Dependencies — der Schreibpfad bildet

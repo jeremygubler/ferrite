@@ -80,6 +80,31 @@ jobs:
         if: always()
         run: losetup -a
 
+  crash:
+    # Meilenstein 3. Bricht den Schreibpfad an jedem einzelnen I/O-Punkt ab und
+    # prueft danach, dass sich das Array oeffnen laesst, die Paritaet passt und
+    # kein bestaetigter Write fehlt.
+    #
+    # Braucht weder Root noch einen besonderen Kernel — nur Linux, weil der
+    # Abbruch ein SIGKILL an den eigenen Prozess ist. Deshalb steht dieser Job
+    # nicht bei den Geraete-Jobs, sondern gehoert zum Pflichtteil.
+    name: Crash-Harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--nocapture`, damit im Log steht, wieviele Punkte geprueft wurden.
+      # Eine Zahl, die still von 80 auf 3 faellt, waere sonst nicht zu sehen.
+      - name: Absturz an jedem I/O-Punkt
+        run: cargo test -p ferrite-harness --test crash -- --nocapture --test-threads=1
+
   ublk:
     # Die `#[ignore]`-Tests aus `engine/tests/ublk.rs`. Sie legen echte
     # Blockgeraete im Kernel an — ohne diesen Job liefe der ublk-Pfad

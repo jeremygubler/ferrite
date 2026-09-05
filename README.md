@@ -10,10 +10,11 @@ Bit-Rot, atomare Updates. Läuft bare metal wie virtualisiert.
 > eingefroren. **Ferrite selbst ist es nicht** — die beiden Versionen haben
 > nichts miteinander zu tun. Seit Meilenstein 2 stellt Ferrite je Data-Member
 > ein Blockgerät bereit, btrfs läuft darauf, und jeder Write geht durch Log und
-> Parität. **Trotzdem: Lege nichts darauf ab, wovon du nur eine Kopie hast.**
-> Der Rebuild auf Platte fehlt, und vor allem fehlt der Nachweis, dass beim
-> Stromausfall nichts verlorengeht — das ist das Crash-Harness aus Meilenstein 3,
-> und bis es grün in CI läuft, ist jede Zusage über Dauerhaftigkeit ungedeckt.
+> Parität. Der Absturz an jedem einzelnen I/O-Punkt des Schreibpfads läuft seit
+> Meilenstein 3 in CI. **Trotzdem: Lege nichts darauf ab, wovon du nur eine
+> Kopie hast.** Was der Nachweis noch nicht abdeckt, sind Lesefehler, stille
+> Korruption und halb geschriebene Sektoren auf echter Hardware — und ohne die
+> ist keine Zusage über Dauerhaftigkeit vollständig gedeckt.
 
 ## Warum
 
@@ -72,14 +73,21 @@ Entwickler nie findet.
    Offen bleibt der Write-Back-Modus — er braucht ein Gerät, dessen Flush
    nachweislich ehrlich ist.
    **Braucht Linux** mit geladenem `ublk_drv`.
-3. **Crash-Harness.** `dm-flakey` und `dm-dust` für Lesefehler und stille
-   Korruption, Power-Fail per `SIGKILL` an zufälligen Punkten im Schreibpfad,
-   danach Replay und vollständige Paritätsverifikation. Ab hier in CI,
-   blockiert Merges.
-   Ein Fall wartet hier schon: **Absturz im degradierten Betrieb.** Neurechnen
-   der Parität scheitert am fehlenden Member, Fortschreiben am nach dem Absturz
-   unzuverlässigen alten Inhalt. `engine` gibt dafür bewusst einen Fehler
-   (`CannotUpdateParity`) statt einer geratenen Antwort — was stattdessen
+3. **Crash-Harness.** Der Power-Fail-Teil steht und **läuft in CI**: Der
+   Schreibpfad wird an *jedem einzelnen* I/O-Punkt per `SIGKILL` abgebrochen —
+   nicht an zufälligen, sondern durchgezählt, damit keine Lücke bleibt und jeder
+   Fehlschlag exakt wiederholbar ist. Danach werden drei Zusagen geprüft: das
+   Array lässt sich öffnen, die Parität passt nach dem Recovery zum Inhalt der
+   Data-Members, und kein bestätigter Write fehlt. Ein Selbsttest weist nach,
+   dass das Harness einen bekannten Fehler wirklich bemerkt — ein Harness, das
+   immer grün ist, wäre eine Behauptung.
+   Offen sind `dm-flakey` und `dm-dust` für Lesefehler, stille Korruption und
+   halb geschriebene Sektoren — das ist die Lücke, die ein `SIGKILL` zwischen
+   zwei Operationen nicht abdeckt.
+   Ein Fall wartet hier ebenfalls noch: **Absturz im degradierten Betrieb.**
+   Neurechnen der Parität scheitert am fehlenden Member, Fortschreiben am nach
+   dem Absturz unzuverlässigen alten Inhalt. `engine` gibt dafür bewusst einen
+   Fehler (`CannotUpdateParity`) statt einer geratenen Antwort — was stattdessen
    passieren soll, entscheidet dieses Harness.
 4. **Repair-Broker.** btrfs-EIO abfangen, rekonstruieren, zurückschreiben.
 5. **Pool-Namespace.** FUSE-Passthrough, Share-Policies.
@@ -101,6 +109,7 @@ von Anfang an mitläuft.
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
 | `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion und Rebuild — 137 Tests grün (127 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
+| `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 4 Tests, in CI |
 | `broker/` | offen |
 | `pool/` | offen |
 | `ctl/` | offen |

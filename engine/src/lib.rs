@@ -33,6 +33,10 @@
 //! ```
 
 pub mod array;
+/// Abbruchpunkte fuer das Crash-Harness. Braucht `SIGKILL` und damit Linux,
+/// und das Cargo-Feature `crash-points` — ohne es existiert das Modul nicht.
+#[cfg(all(target_os = "linux", feature = "crash-points"))]
+pub mod crash;
 pub mod device;
 pub mod error;
 pub mod flush;

@@ -414,6 +414,14 @@ impl ArrayWriter {
         member.flush()?;
         batch.advance_to(BatchStage::DataWritten)?;
 
+        // Die Mutation aus `crash.rs` zieht den Checkpoint hierher vor. Sie
+        // ist nur mit dem Feature `crash-points` ueberhaupt vorhanden und
+        // dient allein dem Nachweis, dass das Harness so etwas bemerkt.
+        let mutated = checkpoint_before_parity();
+        if mutated {
+            self.log.append_checkpoint()?;
+        }
+
         // 4. Paritaet.
         match method {
             ParityUpdate::Incremental => {
@@ -426,9 +434,83 @@ impl ArrayWriter {
 
         // 5. Erst jetzt der Checkpoint. Er gibt Log-Platz frei, und was er
         //    freigibt, muss auf den Platten stehen.
-        self.log.append_checkpoint()?;
+        if !mutated {
+            self.log.append_checkpoint()?;
+        }
         batch.advance_to(BatchStage::Checkpointed)?;
         Ok(())
+    }
+
+    // --- Recovery ---------------------------------------------------------
+
+    /// Schritt 5 aus Abschnitt 5.2: die akzeptierten Writes anwenden, dann die
+    /// Paritaet neu rechnen, dann einen Checkpoint schreiben.
+    ///
+    /// **Nach einem Absturz wird neu gerechnet und nicht fortgeschrieben.** Der
+    /// Replay wendet Writes erneut an; steht der neue Inhalt schon auf der
+    /// Platte, ist `D_alt` in Wirklichkeit `D_neu`, und `P ^ D_neu ^ D_neu`
+    /// liesse die Paritaet unveraendert — also veraltet. `required_parity_update`
+    /// sagt genau das, und hier wird es befolgt statt neu entschieden.
+    ///
+    /// Ein Record, der die Bedingungen aus Abschnitt 5.2 verletzt, beendet den
+    /// Replay wie jeder andere Bruch der Kette. Er wird nicht uebersprungen:
+    /// Was danach kommt, gehoert zu einer Runde, deren Anfang fehlt.
+    ///
+    /// Rueckgabe ist die Zahl der angewendeten Writes.
+    pub fn recover(&mut self, recovery: &crate::log_device::LogRecovery) -> Result<u64> {
+        let mut applied = 0u64;
+        let mut touched: Vec<(u64, usize)> = Vec::new();
+
+        for record in recovery.records()? {
+            if record.header.record_type != ferrite_format::log::RecordType::Write {
+                continue;
+            }
+            let slot_index = record.header.slot_index;
+            let offset = record.header.target_offset;
+
+            // Beide Werte kommen ungeprueft von der Platte. Ohne diese
+            // Pruefung schriebe der Replay ueber das Ende der Payload-Region
+            // hinaus — im besten Fall in den Backup-Superblock.
+            let member = match self.member(slot_index) {
+                Ok(member) => member,
+                Err(_) => break,
+            };
+            if self
+                .check_within(member, offset, record.payload.len())
+                .is_err()
+            {
+                break;
+            }
+
+            member.write_within(offset, record.payload)?;
+            touched.push((offset, record.payload.len()));
+            applied += 1;
+        }
+
+        if applied == 0 {
+            return Ok(0);
+        }
+        for member in &self.data {
+            member.flush()?;
+        }
+
+        // Die Paritaet fuer jeden beruehrten Bereich neu bilden. Ueberlappen
+        // sich zwei Bereiche, wird der gemeinsame Teil zweimal gerechnet — das
+        // kostet Zeit und aendert nichts, weil Neurechnen keinen Vorzustand
+        // braucht.
+        for (offset, len) in &touched {
+            let method = self.choose_method(BatchOrigin::Replay, *offset, *len)?;
+            match method {
+                ParityUpdate::Recompute => self.recompute_parity(*offset, *len)?,
+                // `required_parity_update` gibt nach einem Absturz nur
+                // `Recompute` oder einen Fehler zurueck. Kaeme hier etwas
+                // anderes, waere eine Annahme falsch — melden statt rechnen.
+                ParityUpdate::Incremental => return Err(EngineError::CannotUpdateParity),
+            }
+        }
+
+        self.log.append_checkpoint()?;
+        Ok(applied)
     }
 
     // --- Rebuild ----------------------------------------------------------
@@ -718,4 +800,20 @@ pub fn member_for(device: MemberDevice, superblock: &Superblock, expected: Role)
         }));
     }
     Member::new(device, superblock)
+}
+
+/// Ist die Mutation `CheckpointBeforeParity` scharfgestellt?
+///
+/// Ohne das Feature `crash-points` gibt es keine Mutationen, und diese Funktion
+/// ist eine Konstante, die der Optimierer wegwirft. Siehe `crash::Mutation` —
+/// sie existiert allein dafuer, dass sich nachweisen laesst, dass das
+/// Crash-Harness einen Fehler dieser Art ueberhaupt bemerkt.
+#[cfg(all(target_os = "linux", feature = "crash-points"))]
+fn checkpoint_before_parity() -> bool {
+    crate::crash::mutation() == Some(crate::crash::Mutation::CheckpointBeforeParity)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "crash-points")))]
+fn checkpoint_before_parity() -> bool {
+    false
 }

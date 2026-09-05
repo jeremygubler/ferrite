@@ -99,6 +99,7 @@ impl MemberDevice {
             return Err(EngineError::NotWritable);
         }
         self.check_range(offset, data.len())?;
+        crash_point();
         write_all_at(&self.file, offset, data).map_err(io_error("Member schreiben"))
     }
 
@@ -108,6 +109,7 @@ impl MemberDevice {
     /// nicht, ihre Groesse aendert sich nie. Ob das Geraet den Flush ehrlich
     /// beantwortet, ist eine andere Frage — die stellt Abschnitt 5.3.
     pub fn flush(&self) -> Result<()> {
+        crash_point();
         self.file.sync_data().map_err(io_error("Member flushen"))
     }
 
@@ -235,3 +237,19 @@ pub(crate) fn write_all_at(file: &File, offset: u64, data: &[u8]) -> std::io::Re
     }
     Ok(())
 }
+
+// --- Abbruchpunkt fuer das Crash-Harness ---------------------------------
+//
+// Hier steht der einzige Ort, an dem dieses Crate schreibt und flusht — und
+// damit der einzige, an dem ein Stromausfall etwas anrichten kann. Ohne das
+// Feature `crash-points` ist die Funktion leer und verschwindet im Optimierer.
+
+#[cfg(all(target_os = "linux", feature = "crash-points"))]
+#[inline]
+fn crash_point() {
+    crate::crash::before_io();
+}
+
+#[cfg(not(all(target_os = "linux", feature = "crash-points")))]
+#[inline(always)]
+fn crash_point() {}

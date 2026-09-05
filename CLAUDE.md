@@ -75,6 +75,8 @@ aufgegeben.
 format/   Superblock, Log-Records, Ringpuffer, Assemble — kein I/O    [fertig]
 parity/   GF(2^8), Reed-Solomon P+Q, Rekonstruktion                 [fertig]
 integration/ In-Memory-Generalprobe beider Crates, keine Produktion  [fertig]
+harness/  Crash-Harness: SIGKILL an jedem I/O-Punkt, in CI            [fertig]
+          dm-flakey und dm-dust fuer Lesefehler und Korruption      [offen]
 engine/   Planung von Schreibpfad und Rebuild — kein I/O            [fertig]
           Geraetezugriff, Array, Flush-Test, Write-Log auf Platte   [fertig]
           ublk-Target mit Passthrough — Linux, io_uring             [fertig]
@@ -127,7 +129,9 @@ virtualisierten Log-Geräten gilt Abschnitt 5.3 des Formatdokuments
 
 `format/`, `parity/`, Fuzzing und CI brauchen weder speziellen Kernel noch
 Platten und laufen überall. `pool/` braucht FUSE, für Passthrough Kernel ≥ 6.9.
-Das Crash-Harness braucht `dm-flakey`/`dm-dust` und Root.
+Der Power-Fail-Teil des Crash-Harness braucht nur Linux und laeuft in CI. Fuer
+Lesefehler und stille Korruption braucht es zusaetzlich `dm-flakey`/`dm-dust`
+und Root — das steht noch aus.
 
 Fehlt eine dieser Voraussetzungen: melden, nicht mocken. Ein Mock, der etwas
 anderes testet als die Realität, ist in einem Speicherprojekt schlimmer als gar

@@ -23,6 +23,14 @@ name = "ferrite-format"
 version = "0.1.0"
 
 [[package]]
+name = "ferrite-harness"
+version = "0.1.0"
+dependencies = [
+ "ferrite-engine",
+ "ferrite-format",
+]
+
+[[package]]
 name = "ferrite-integration"
 version = "0.1.0"
 dependencies = [
