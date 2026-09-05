@@ -54,6 +54,13 @@ fn main() -> ExitCode {
                 .unwrap_or(12);
             write(directory, count)
         }
+        "degrade" => {
+            let slot = args
+                .get(3)
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(0);
+            degrade(directory, slot)
+        }
         "verify" => verify(directory),
         other => {
             eprintln!("unbekannte Phase: {other}");
@@ -123,6 +130,20 @@ fn write(directory: &Path, count: u64) -> Result<(), String> {
 
     println!("{}", ferrite_engine::crash::count());
     Ok(())
+}
+
+/// Meldet einen Data-Member als unbrauchbar.
+///
+/// Danach laeuft das Array degradiert: Reads auf diesen Slot kommen aus der
+/// Paritaet, und der Schreibpfad schreibt die Paritaet fort statt sie neu zu
+/// rechnen — der fehlende Member liesse sich nicht lesen.
+#[cfg(target_os = "linux")]
+fn degrade(directory: &Path, slot: u16) -> Result<(), String> {
+    let (mut writer, _) =
+        ferrite_harness::open(directory).map_err(|error| format!("oeffnen: {error}"))?;
+    writer
+        .mark_member(slot, ferrite_format::superblock::MemberState::Stale, 0)
+        .map_err(|error| format!("Member melden: {error}"))
 }
 
 /// Prueft die drei Zusagen aus dem Modulkopf von `ferrite_harness`.

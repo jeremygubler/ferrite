@@ -22,7 +22,7 @@
 //! Replay an der falschen Stelle. Ein gesparter Schreibvorgang gegen einen
 //! stillen Datenverlust ist kein Handel.
 
-use ferrite_format::log::{LogRecordHeader, LOG_SECTOR_SIZE};
+use ferrite_format::log::{LogRecordHeader, RecordType, LOG_SECTOR_SIZE};
 use ferrite_format::superblock::{Role, Superblock};
 use ferrite_format::{plan_append, FormatError, LogRing, Replay, ReplayStop};
 
@@ -108,10 +108,27 @@ impl DeviceLog {
         log.device.read_at(log.region_offset, &mut region)?;
 
         let ring = LogRing::new(&region).map_err(EngineError::Format)?;
-        let mut replay = ring.replay(superblock.generation);
 
-        // Der Kopf kommt hinter den letzten akzeptierten Record. Steht dort
-        // nichts, beginnt das Log bei null.
+        // Kopf und naechste Sequenznummer: erst aus dem Replay, und wenn der
+        // nichts hergibt, aus dem **Scan**.
+        //
+        // Der Replay beginnt hinter dem juengsten Checkpoint und liefert im
+        // Normalbetrieb gar nichts — dort ist immer alles gedeckt. Wer daraus
+        // den Zustand ableitet, faengt nach jedem Neustart wieder bei Offset 0
+        // und `seq == 1` an: Der naechste Record ueberschreibt den aeltesten
+        // und traegt eine Nummer, die schon vergeben war. Die Kette ist dann
+        // gebrochen, und ein Replay findet nach einem Absturz nichts mehr.
+        //
+        // Abschnitt 5.1 sagt es klar: `seq` steigt streng monoton **ueber die
+        // Lebensdauer des Arrays**. Ein Checkpoint deckt, was vor ihm liegt —
+        // er setzt keinen Zaehler zurueck.
+        //
+        // **Nur wenn der Replay nichts akzeptiert hat.** Hat er etwas
+        // akzeptiert, ist die Kette bis dorthin gueltig und wird fortgesetzt —
+        // dann gilt weiter, was der Replay sagt. Nach einem Bruch liegen hinter
+        // dem Kopf noch Records einer verworfenen Runde; die zu ueberspringen
+        // hiesse, den Kopf hinter Muell zu setzen.
+        let mut replay = ring.replay(superblock.generation);
         let mut head = 0;
         let mut next_seq = 1;
         let mut accepted = 0;
@@ -125,6 +142,28 @@ impl DeviceLog {
 
         // Vor dem Verschieben von `region` abfragen: `replay` leiht sie noch.
         let stop = replay.stop();
+
+        if accepted == 0 {
+            // `Padding` bleibt aussen vor: Es nimmt an der Kette nicht teil und
+            // verbraucht keine Sequenznummer (Abschnitt 5.1). Der Record mit
+            // der hoechsten `seq` ist damit der zuletzt geschriebene, auch nach
+            // einem Umlauf des Ringpuffers.
+            let newest = ring
+                .scan()
+                .filter(|(_, header)| header.record_type != RecordType::Padding)
+                .max_by_key(|(_, header)| header.seq);
+
+            if let Some((sector, header)) = newest {
+                let offset = sector * LOG_SECTOR_SIZE;
+                let plan =
+                    plan_append(log.region_len, offset, &header).map_err(EngineError::Format)?;
+                head = plan.next_head;
+                // `saturating_add`: Bei `u64::MAX` bleibt es dabei, und ein
+                // Record mit dieser Nummer beendet die Kette ohnehin
+                // (Abschnitt 5.2).
+                next_seq = header.seq.saturating_add(1);
+            }
+        }
 
         log.head = head;
         log.next_seq = next_seq;

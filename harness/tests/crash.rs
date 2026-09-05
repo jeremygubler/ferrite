@@ -272,3 +272,86 @@ fn the_harness_notices_a_checkpoint_written_too_early() {
         "der Fehlschlag kam nicht von einer der Zusagen: {message}"
     );
 }
+
+// --- Der Fall, der seit Meilenstein 1 auf eine Entscheidung wartet --------
+
+/// Absturz im degradierten Betrieb.
+///
+/// Ein Member ist ausgefallen, der Schreibpfad laeuft weiter — und dann faellt
+/// der Strom aus. Beim Recovery ist Neurechnen unmoeglich (der fehlende Member
+/// liesse sich nicht lesen) und Fortschreiben ebenfalls (nach dem Absturz ist
+/// unbekannt, ob die Paritaet zum alten oder neuen Inhalt gehoert).
+///
+/// `required_parity_update` gibt dafuer `CannotUpdateParity` zurueck. Dieser
+/// Test haelt fest, **was das in der Praxis bedeutet** — nicht als Zusage,
+/// sondern als Befund fuer die Entscheidung, die noch aussteht.
+#[test]
+fn a_crash_while_degraded_is_measured_and_not_guessed() {
+    let workspace = Workspace::new("degradiert");
+    let array = workspace.path().join("array");
+    let pristine = workspace.path().join("frisch");
+
+    assert_eq!(run_worker("create", &array, &[], None).status, Some(0));
+
+    // Ein paar Writes im gesunden Zustand, dann faellt Slot 2 aus.
+    let warmup = run_worker("write", &array, &[&WRITES.to_string()], None);
+    assert_eq!(warmup.status, Some(0), "Vorlauf: {}", warmup.stderr);
+    let degraded = run_worker("degrade", &array, &["2"], None);
+    assert_eq!(degraded.status, Some(0), "degradieren: {}", degraded.stderr);
+    copy_dir(&array, &pristine);
+
+    let counted = run_worker("write", &array, &[&WRITES.to_string()], None);
+    assert_eq!(
+        counted.status,
+        Some(0),
+        "der Schreibpfad kommt im degradierten Betrieb nicht durch: {}",
+        counted.stderr
+    );
+    let points: u64 = counted.stdout.parse().expect("Zahl der I/O-Punkte");
+
+    let mut openable = 0u64;
+    let mut refused = 0u64;
+    let mut other = Vec::new();
+
+    for at in 1..=points {
+        copy_dir(&pristine, &array);
+        let run = run_worker("write", &array, &[&WRITES.to_string()], Some(at));
+        if !run.killed {
+            continue;
+        }
+
+        let verified = run_worker("verify", &array, &[], None);
+        if verified.status == Some(0) {
+            openable += 1;
+        } else if verified
+            .stderr
+            .contains("weder neu rechenbar noch fortschreibbar")
+        {
+            refused += 1;
+        } else {
+            other.push((at, verified.stderr.clone()));
+        }
+    }
+
+    eprintln!(
+        "Absturz im degradierten Betrieb: {openable} von {points} Punkten kamen durch, \
+         {refused} endeten in CannotUpdateParity, {} in etwas anderem",
+        other.len()
+    );
+    for (at, message) in other.iter().take(3) {
+        eprintln!("  Punkt {at}: {message}");
+    }
+
+    // Kein `assert` auf das Ergebnis: Was hier herauskommt, ist der Befund,
+    // aus dem die Entscheidung folgt, und keine Zusage, die schon gaelte.
+    // Festgehalten wird nur, dass der Lauf ueberhaupt etwas gemessen hat —
+    // ein Test, der still null Punkte prueft, waere wertlos.
+    assert!(
+        openable + refused + other.len() as u64 > 0,
+        "kein einziger Abbruchpunkt wurde ausgewertet"
+    );
+    assert!(
+        other.is_empty(),
+        "unerwartete Fehler jenseits von CannotUpdateParity: {other:?}"
+    );
+}

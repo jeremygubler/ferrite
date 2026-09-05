@@ -403,3 +403,68 @@ fn a_read_only_log_refuses_to_be_written() {
         Err(EngineError::NotWritable)
     );
 }
+
+// --- Die Sequenzkette ueber Checkpoints hinweg ---------------------------
+
+#[test]
+fn the_sequence_keeps_running_across_a_checkpoint() {
+    // Abschnitt 5.1: `seq` ist streng monoton steigend **ueber die Lebensdauer
+    // des Arrays**. Ein Checkpoint deckt alles vor sich ab, aber er setzt den
+    // Zaehler nicht zurueck.
+    //
+    // Faellt dieser Test, vergibt das Log nach jedem Neustart wieder kleine
+    // Sequenznummern. Der Replay findet die neuen Records dann nicht als
+    // Nachfolger des Checkpoints — und wendet nach einem Absturz nichts an.
+    let scratch = Scratch::new("kette-ueber-checkpoint");
+    let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
+    log.append_write(0, 0, &payload(1, 64)).unwrap();
+    log.append_checkpoint().unwrap();
+    let after = log.next_seq();
+    assert_eq!(after, 3, "zwei Records vergeben seq 1 und 2");
+
+    let (reopened, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    assert_eq!(
+        recovery.accepted, 0,
+        "der Checkpoint deckt den Write, es gibt nichts anzuwenden"
+    );
+    assert_eq!(
+        reopened.next_seq(),
+        after,
+        "die Sequenznummer ist nach dem Neustart zurueckgesprungen"
+    );
+    assert_eq!(
+        reopened.head(),
+        2 * LOG_SECTOR_SIZE,
+        "der Kopf liegt nicht hinter dem zuletzt geschriebenen Record"
+    );
+}
+
+#[test]
+fn a_record_written_after_a_checkpoint_is_replayed() {
+    // Der Fall, um den es wirklich geht: Nach einem Checkpoint wird ein Write
+    // geloggt, und dann faellt der Strom aus, bevor er angewendet ist. Beim
+    // naechsten Oeffnen muss der Replay ihn finden.
+    let scratch = Scratch::new("nach-checkpoint");
+    {
+        let mut log = DeviceLog::initialize(scratch.open(), &log_superblock()).unwrap();
+        log.append_write(0, 0, &payload(1, 64)).unwrap();
+        log.append_checkpoint().unwrap();
+    }
+    {
+        // Neustart, dann ein weiterer Write — so wie im laufenden Betrieb.
+        let (mut log, _) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+        log.append_write(1, 4096, &payload(2, 128)).unwrap();
+    }
+
+    let (_, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    let seqs: Vec<u64> = recovery
+        .records()
+        .unwrap()
+        .map(|record| record.header.seq)
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![3],
+        "der Record nach dem Checkpoint wurde nicht wiedergefunden"
+    );
+}
