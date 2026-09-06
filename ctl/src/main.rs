@@ -36,6 +36,9 @@ fn main() -> ExitCode {
         Command::Create(plan) => execute_create(&plan),
         Command::Status(request) => execute_status(&request.devices),
         Command::Run(plan) => execute_run(&plan),
+        Command::Scrub(request) => execute_scrub(&request),
+        Command::Replace(plan) => execute_replace(&plan),
+        Command::Rebuild(request) => execute_rebuild(&request),
     }
 }
 
@@ -93,5 +96,63 @@ fn execute_run(plan: &ferrite_ctl::RunPlan) -> ExitCode {
 #[cfg(not(target_os = "linux"))]
 fn execute_run(_plan: &ferrite_ctl::RunPlan) -> ExitCode {
     eprintln!("ferrite run braucht Linux mit ublk_drv und /dev/fuse.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+#[cfg(unix)]
+fn execute_scrub(request: &ferrite_ctl::args::ScrubRequest) -> ExitCode {
+    match ferrite_ctl::repair::scrub(request) {
+        // Ein Befund ist kein Programmfehler, aber auch kein Erfolg: Ein
+        // Monitoring, das hier `0` bekaeme, meldete eine veraltete Paritaet
+        // nie.
+        Ok(outcome) if outcome.is_clean() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn execute_replace(plan: &ferrite_ctl::args::ReplacePlan) -> ExitCode {
+    match ferrite_ctl::repair::replace(plan) {
+        Ok((text, _)) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(unix)]
+fn execute_rebuild(request: &ferrite_ctl::args::RebuildRequest) -> ExitCode {
+    match ferrite_ctl::repair::rebuild(request) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn execute_scrub(_request: &ferrite_ctl::args::ScrubRequest) -> ExitCode {
+    eprintln!("ferrite scrub braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+#[cfg(not(unix))]
+fn execute_replace(_plan: &ferrite_ctl::args::ReplacePlan) -> ExitCode {
+    eprintln!("ferrite replace braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+#[cfg(not(unix))]
+fn execute_rebuild(_request: &ferrite_ctl::args::RebuildRequest) -> ExitCode {
+    eprintln!("ferrite rebuild braucht ein System mit Blockgeraeten.");
     ExitCode::from(EXIT_USAGE)
 }

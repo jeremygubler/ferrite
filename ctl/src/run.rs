@@ -15,11 +15,13 @@ use ferrite_engine::{
     create_array, max_payload_size, read_superblock, ArraySpec, DeviceLog, EngineError,
     MemberDevice, MemberSpec,
 };
-use ferrite_format::superblock::Role;
+use ferrite_format::superblock::{Role, Superblock};
 use ferrite_format::Uuid;
 
 use crate::args::CreatePlan;
 use crate::report::{self, Planned, Report, Seen};
+use ferrite_engine::{member_for, ArrayWriter, Member};
+use ferrite_format::assemble;
 
 /// Warum ein Aufruf nicht durchging.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,7 +241,7 @@ pub fn status(devices: &[PathBuf]) -> Report {
 /// Rechner, die aus demselben Abbild starten und in derselben Sekunde ein
 /// Array anlegen, bekaemen sonst dieselbe UUID — und zwei Arrays mit
 /// derselben UUID setzen sich gegenseitig zusammen.
-fn random_uuid() -> Result<Uuid> {
+pub(crate) fn random_uuid() -> Result<Uuid> {
     use std::io::Read;
 
     let mut bytes = [0u8; 16];
@@ -256,6 +258,77 @@ fn now_unix() -> u64 {
         // Eine Uhr vor 1970 macht ein Array nicht unbrauchbar; das Feld ist
         // Information, keine Gueltigkeitsregel.
         .unwrap_or(0)
+}
+
+// --- Das Array oeffnen ----------------------------------------------------
+
+/// Oeffnet die Geraete, prueft sie mit `assemble` und spielt das Log zurueck.
+///
+/// Steht hier und nicht in `serve`, weil `scrub`, `rebuild` und der laufende
+/// Betrieb dasselbe brauchen — und weil die ersten beiden ohne ublk und ohne
+/// Root auskommen. Ein Array laesst sich auf Dateien pruefen und
+/// wiederherstellen; nur der Betrieb braucht Blockgeraete.
+pub fn open_array(devices: &[PathBuf]) -> Result<ArrayWriter> {
+    let mut superblocks = Vec::with_capacity(devices.len());
+    for path in devices {
+        let device = MemberDevice::open_read_only(path).map_err(at(path))?;
+        superblocks.push(read_superblock(&device).map_err(at(path))?);
+    }
+
+    // Dieselbe Pruefung wie ueberall. Sie sagt auch, welches Geraet welche
+    // Rolle traegt — gefragt wird danach nicht.
+    let layout = assemble(&superblocks)
+        .map_err(EngineError::Format)
+        .map_err(CtlError::Engine)?;
+
+    let data: Vec<Member> = (0..layout.data_slot_count() as u16)
+        .map(|slot| {
+            let position = layout.data_position(slot).ok_or(CtlError::Missing {
+                what: "assemble hat einen Data-Slot ohne Member durchgelassen",
+            })?;
+            open_member(&devices[position], &superblocks[position], Role::Data)
+        })
+        .collect::<Result<_>>()?;
+
+    let p = layout.parity_p_position();
+    let parity_p = open_member(&devices[p], &superblocks[p], Role::ParityP)?;
+    let parity_q = match layout.parity_q_position() {
+        Some(q) => Some(open_member(&devices[q], &superblocks[q], Role::ParityQ)?),
+        None => None,
+    };
+
+    let log_position = layout.log_position().ok_or(CtlError::Missing {
+        what: "das Array hat kein Log — ohne eines gibt es kein Recovery",
+    })?;
+    let log_device =
+        MemberDevice::open(&devices[log_position]).map_err(at(&devices[log_position]))?;
+    let (log, recovery) = DeviceLog::open(log_device, &superblocks[log_position])
+        .map_err(at(&devices[log_position]))?;
+
+    let mut writer = ArrayWriter::new(log, data, parity_p, parity_q).map_err(CtlError::Engine)?;
+
+    // Vor dem ersten Blockgeraet, nicht danach.
+    let recovered = writer.recover(&recovery).map_err(CtlError::Engine)?;
+    if recovered.applied > 0 {
+        println!(
+            "Recovery: {} Writes aus dem Log angewendet.",
+            recovered.applied
+        );
+    }
+    for lost in &recovered.lost {
+        // Das ist der Fall aus Meilenstein 3: Absturz im degradierten
+        // Betrieb. Er wird genannt, nicht verschwiegen.
+        println!(
+            "  verloren: Slot {} bei Offset {} ueber {} Bytes",
+            lost.slot_index, lost.offset, lost.len
+        );
+    }
+    Ok(writer)
+}
+
+fn open_member(path: &Path, superblock: &Superblock, role: Role) -> Result<Member> {
+    let device = MemberDevice::open(path).map_err(at(path))?;
+    member_for(device, superblock, role).map_err(at(path))
 }
 
 #[cfg(test)]

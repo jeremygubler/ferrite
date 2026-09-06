@@ -41,11 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ferrite_engine::ublk::{ArraySlot, UblkDevice, UblkSpec, CONTROL_PATH};
-use ferrite_engine::{
-    member_for, read_superblock, ArrayWriter, DeviceLog, EngineError, Member, MemberDevice,
-};
-use ferrite_format::assemble;
-use ferrite_format::superblock::{Role, Superblock};
+use ferrite_engine::Member;
 use ferrite_pool::fuse::{BranchRoot, Connection, MountOptions, PoolFs};
 use ferrite_pool::{BranchId, SharePolicy};
 
@@ -84,7 +80,7 @@ pub fn run(plan: &RunPlan) -> Result<()> {
         });
     }
 
-    let writer = open_array(&plan.devices)?;
+    let writer = crate::run::open_array(&plan.devices)?;
 
     // Je Slot seine **eigene** Groesse. Members duerfen verschieden gross
     // sein — das ist der Kern des Projekts, und ein Blockgeraet, das fuer
@@ -157,72 +153,6 @@ pub fn run(plan: &RunPlan) -> Result<()> {
     stop_all(devices);
     println!("Alles abgebaut.");
     Ok(())
-}
-
-// --- Das Array oeffnen ----------------------------------------------------
-
-/// Oeffnet die Geraete, prueft sie mit `assemble` und spielt das Log zurueck.
-fn open_array(devices: &[PathBuf]) -> Result<ArrayWriter> {
-    let mut superblocks = Vec::with_capacity(devices.len());
-    for path in devices {
-        let device = MemberDevice::open_read_only(path).map_err(at(path))?;
-        superblocks.push(read_superblock(&device).map_err(at(path))?);
-    }
-
-    // Dieselbe Pruefung wie ueberall. Sie sagt auch, welches Geraet welche
-    // Rolle traegt — gefragt wird danach nicht.
-    let layout = assemble(&superblocks)
-        .map_err(EngineError::Format)
-        .map_err(CtlError::Engine)?;
-
-    let data: Vec<Member> = (0..layout.data_slot_count() as u16)
-        .map(|slot| {
-            let position = layout.data_position(slot).ok_or(CtlError::Missing {
-                what: "assemble hat einen Data-Slot ohne Member durchgelassen",
-            })?;
-            open_member(&devices[position], &superblocks[position], Role::Data)
-        })
-        .collect::<Result<_>>()?;
-
-    let p = layout.parity_p_position();
-    let parity_p = open_member(&devices[p], &superblocks[p], Role::ParityP)?;
-    let parity_q = match layout.parity_q_position() {
-        Some(q) => Some(open_member(&devices[q], &superblocks[q], Role::ParityQ)?),
-        None => None,
-    };
-
-    let log_position = layout.log_position().ok_or(CtlError::Missing {
-        what: "das Array hat kein Log — ohne eines gibt es kein Recovery",
-    })?;
-    let log_device =
-        MemberDevice::open(&devices[log_position]).map_err(at(&devices[log_position]))?;
-    let (log, recovery) = DeviceLog::open(log_device, &superblocks[log_position])
-        .map_err(at(&devices[log_position]))?;
-
-    let mut writer = ArrayWriter::new(log, data, parity_p, parity_q).map_err(CtlError::Engine)?;
-
-    // Vor dem ersten Blockgeraet, nicht danach.
-    let recovered = writer.recover(&recovery).map_err(CtlError::Engine)?;
-    if recovered.applied > 0 {
-        println!(
-            "Recovery: {} Writes aus dem Log angewendet.",
-            recovered.applied
-        );
-    }
-    for lost in &recovered.lost {
-        // Das ist der Fall aus Meilenstein 3: Absturz im degradierten
-        // Betrieb. Er wird genannt, nicht verschwiegen.
-        println!(
-            "  verloren: Slot {} bei Offset {} ueber {} Bytes",
-            lost.slot_index, lost.offset, lost.len
-        );
-    }
-    Ok(writer)
-}
-
-fn open_member(path: &Path, superblock: &Superblock, role: Role) -> Result<Member> {
-    let device = MemberDevice::open(path).map_err(at(path))?;
-    member_for(device, superblock, role).map_err(at(path))
 }
 
 // --- Der Pool -------------------------------------------------------------
@@ -378,13 +308,6 @@ fn stop_all(devices: Vec<(u16, UblkDevice, String)>) {
         if let Err(error) = device.stop() {
             eprintln!("Slot {slot} liess sich nicht abbauen: {error}");
         }
-    }
-}
-
-fn at(path: &Path) -> impl FnOnce(EngineError) -> CtlError + '_ {
-    move |source| CtlError::Device {
-        path: path.to_path_buf(),
-        source,
     }
 }
 

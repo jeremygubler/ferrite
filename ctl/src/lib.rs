@@ -25,6 +25,9 @@
 //! Pool — braucht einen Prozess, der bleibt, und das ist der naechste Schritt.
 
 pub mod args;
+/// Scrub, Ersatz und Rebuild. Braucht Geraete, aber weder ublk noch FUSE.
+#[cfg(unix)]
+pub mod repair;
 pub mod report;
 /// Die Aufrufe, die ein Geraet anfassen. Braucht ein Betriebssystem mit
 /// Blockgeraeten.

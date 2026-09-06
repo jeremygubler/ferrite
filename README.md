@@ -185,8 +185,23 @@ Entwickler nie findet.
    in der Mitte ist der Punkt: Ohne ihn könnte alles aus einem Cache kommen.
    Formatiert wird dabei nie von selbst. Ein Member ohne Dateisystem wird
    gemeldet — wer die falsche Platte angeschlossen hat, soll sie wiederbekommen.
-   Offen bleiben Kommandos für Scrub und Rebuild und danach der Daemon samt
-   Web-UI.
+   Der Reparaturablauf steht ebenfalls, und er ist einer statt drei Kommandos:
+   Eine Platte fällt aus, `ferrite replace` nimmt die neue auf, `ferrite
+   rebuild` füllt sie aus der Parität, `ferrite scrub` bestätigt, dass danach
+   alles zusammenpasst. Wer nur `rebuild` bauen würde, hätte ein Kommando, das
+   niemand erreichen kann — ohne `replace` gibt es keinen Slot, der darauf
+   wartet.
+   Der **Scrub** ist die Probe, die ein Gerät auffliegen lässt, das seinen
+   Flush belogen hat: Danach steht auf dem Data-Member der neue Inhalt und in
+   der Parität der alte, und nur ein Scrub findet das, bevor es beim nächsten
+   Ausfall auffällt. Er glaubt dabei den **Daten** — die Prüfsummen liegen bei
+   btrfs auf den Data-Members, die Parität ist die abgeleitete Größe und wird
+   neu abgeleitet. Läuft das Array degradiert, wird die Reparatur abgelehnt:
+   Eine Parität über einen unbrauchbaren Member zu bilden hieße, die
+   Rekonstruktion aufzugeben.
+   Der ganze Ablauf läuft in CI durch, **ohne Root und ohne Kernel** — keiner
+   dieser Schritte braucht ein Blockgerät.
+   Offen bleibt der Daemon samt Web-UI.
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
 
@@ -207,7 +222,7 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
-| `ctl/` | Das Werkzeug `ferrite`: Array anlegen, Zustand ansehen, in Betrieb nehmen — 61 Tests grün, davon 13 gegen das echte Binary ohne Root. Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Daemon und Web-UI offen |
+| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild — 74 Tests grün, davon 26 gegen das echte Binary ohne Root (darunter der ganze Reparaturablauf). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Daemon und Web-UI offen |
 
 ```
 cargo test

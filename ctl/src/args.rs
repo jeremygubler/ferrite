@@ -38,9 +38,48 @@ pub enum Command {
     Status(StatusRequest),
     /// Das Array in Betrieb nehmen und dort bleiben.
     Run(Box<RunPlan>),
+    /// Die Paritaet gegen den Inhalt der Data-Members pruefen.
+    Scrub(ScrubRequest),
+    /// Eine ausgefallene Platte durch eine neue ersetzen.
+    Replace(Box<ReplacePlan>),
+    /// Einen als unbrauchbar gemeldeten Member wiederherstellen.
+    Rebuild(RebuildRequest),
     Help,
     Version,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrubRequest {
+    pub devices: Vec<PathBuf>,
+    /// Eine nicht passende Paritaet neu bilden, statt sie nur zu melden.
+    pub repair: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacePlan {
+    /// Die Geraete, die noch da sind — **ohne** das ausgefallene.
+    pub devices: Vec<PathBuf>,
+    pub slot_index: u16,
+    /// Die neue Platte.
+    pub replacement: PathBuf,
+    pub confirmed: bool,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuildRequest {
+    pub devices: Vec<PathBuf>,
+    pub slot_index: u16,
+    /// Wieviele Bloecke je Durchgang.
+    ///
+    /// Zwischen zwei Durchgaengen wird der Fortschritt in den Superblock
+    /// geschrieben. Klein heisst: nach einem Absturz weniger Arbeit doppelt.
+    /// Gross heisst: weniger Schreibvorgaenge auf den Superblock.
+    pub batch: u64,
+}
+
+/// Bloecke je Durchgang, wenn nichts anderes gesagt wird.
+pub const DEFAULT_BATCH: u64 = 64;
 
 /// Was `run` in Betrieb nehmen soll.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +150,10 @@ pub enum ArgError {
     /// Dasselbe Geraet steht mehrfach in der Zeile.
     DuplicateDevice(PathBuf),
     BadBlockSize(String),
+    BadNumber {
+        option: &'static str,
+        value: String,
+    },
     NoDevices,
 }
 
@@ -135,6 +178,9 @@ impl std::fmt::Display for ArgError {
                 f,
                 "unbrauchbare Blockgroesse {value}: erwartet eine Zweierpotenz zwischen 4K und 16M, etwa 64K"
             ),
+            Self::BadNumber { option, value } => {
+                write!(f, "{option} braucht eine Zahl, nicht {value}")
+            }
             Self::NoDevices => write!(f, "keine Geraete angegeben"),
         }
     }
@@ -151,6 +197,9 @@ pub fn parse(arguments: &[String]) -> Result<Command, ArgError> {
         "create" => parse_create(rest).map(|plan| Command::Create(Box::new(plan))),
         "status" => parse_status(rest),
         "run" => parse_run(rest).map(|plan| Command::Run(Box::new(plan))),
+        "scrub" => parse_scrub(rest),
+        "replace" => parse_replace(rest).map(|plan| Command::Replace(Box::new(plan))),
+        "rebuild" => parse_rebuild(rest),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
         other => Err(ArgError::UnknownCommand(other.to_string())),
@@ -285,6 +334,163 @@ fn parse_run(arguments: &[String]) -> Result<RunPlan, ArgError> {
     })
 }
 
+fn parse_scrub(arguments: &[String]) -> Result<Command, ArgError> {
+    let mut devices: Vec<PathBuf> = Vec::new();
+    let mut repair = false;
+
+    for argument in arguments {
+        match argument.as_str() {
+            "--repair" => repair = true,
+            other if other.starts_with("--") => {
+                return Err(ArgError::UnknownOption {
+                    command: "scrub",
+                    option: other.to_string(),
+                })
+            }
+            path => devices.push(PathBuf::from(path)),
+        }
+    }
+
+    if devices.is_empty() {
+        return Err(ArgError::NoDevices);
+    }
+    check_distinct(&devices)?;
+    Ok(Command::Scrub(ScrubRequest { devices, repair }))
+}
+
+fn parse_replace(arguments: &[String]) -> Result<ReplacePlan, ArgError> {
+    let mut devices: Vec<PathBuf> = Vec::new();
+    let mut slot_index: Option<u16> = None;
+    let mut replacement: Option<PathBuf> = None;
+    let mut confirmed = false;
+    let mut force = false;
+
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        match argument {
+            "--yes" => {
+                confirmed = true;
+                index += 1;
+                continue;
+            }
+            "--force" => {
+                force = true;
+                index += 1;
+                continue;
+            }
+            _ if !argument.starts_with("--") => {
+                devices.push(PathBuf::from(argument));
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        let value = arguments
+            .get(index + 1)
+            .ok_or_else(|| ArgError::MissingValue(argument.to_string()))?;
+        match argument {
+            "--slot" => slot_index = Some(parse_slot(value)?),
+            "--with" => replacement = Some(PathBuf::from(value)),
+            other => {
+                return Err(ArgError::UnknownOption {
+                    command: "replace",
+                    option: other.to_string(),
+                })
+            }
+        }
+        index += 2;
+    }
+
+    if devices.is_empty() {
+        return Err(ArgError::NoDevices);
+    }
+    let slot_index = slot_index.ok_or(ArgError::MissingOption {
+        command: "replace",
+        option: "--slot",
+    })?;
+    let replacement = replacement.ok_or(ArgError::MissingOption {
+        command: "replace",
+        option: "--with",
+    })?;
+
+    // Die neue Platte darf nicht schon in der Liste stehen: Sonst wuerde sie
+    // gleichzeitig als Ueberlebende gelesen und als Ersatz beschrieben.
+    let mut all = devices.clone();
+    all.push(replacement.clone());
+    check_distinct(&all)?;
+
+    Ok(ReplacePlan {
+        devices,
+        slot_index,
+        replacement,
+        confirmed,
+        force,
+    })
+}
+
+fn parse_rebuild(arguments: &[String]) -> Result<Command, ArgError> {
+    let mut devices: Vec<PathBuf> = Vec::new();
+    let mut slot_index: Option<u16> = None;
+    let mut batch = DEFAULT_BATCH;
+
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if !argument.starts_with("--") {
+            devices.push(PathBuf::from(argument));
+            index += 1;
+            continue;
+        }
+
+        let value = arguments
+            .get(index + 1)
+            .ok_or_else(|| ArgError::MissingValue(argument.to_string()))?;
+        match argument {
+            "--slot" => slot_index = Some(parse_slot(value)?),
+            "--batch" => {
+                batch = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|blocks| *blocks > 0)
+                    .ok_or_else(|| ArgError::BadNumber {
+                        option: "--batch",
+                        value: value.clone(),
+                    })?
+            }
+            other => {
+                return Err(ArgError::UnknownOption {
+                    command: "rebuild",
+                    option: other.to_string(),
+                })
+            }
+        }
+        index += 2;
+    }
+
+    if devices.is_empty() {
+        return Err(ArgError::NoDevices);
+    }
+    check_distinct(&devices)?;
+    let slot_index = slot_index.ok_or(ArgError::MissingOption {
+        command: "rebuild",
+        option: "--slot",
+    })?;
+    Ok(Command::Rebuild(RebuildRequest {
+        devices,
+        slot_index,
+        batch,
+    }))
+}
+
+fn parse_slot(value: &str) -> Result<u16, ArgError> {
+    value.parse::<u16>().map_err(|_| ArgError::BadNumber {
+        option: "--slot",
+        value: value.to_string(),
+    })
+}
+
 fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
     let devices: Vec<PathBuf> = arguments.iter().map(PathBuf::from).collect();
     if devices.is_empty() {
@@ -374,6 +580,37 @@ ferrite — Werkzeug fuer ein Ferrite-Array
         Beendet wird mit SIGINT oder SIGTERM. Das Aushaengen laeuft in
         umgekehrter Reihenfolge; solange ein Prozess noch im Pool steht,
         wartet es auf ihn.
+
+    ferrite scrub <GERAET> [<GERAET> ...] [--repair]
+
+        Prueft, ob die Paritaet zum Inhalt der Data-Members passt. Das ist
+        die Probe, die ein Geraet auffliegen laesst, das seinen Flush
+        belogen hat: Danach ist die Paritaet veraltet, und nur ein Scrub
+        findet das, bevor es beim naechsten Ausfall auffaellt.
+
+        Ohne --repair wird nur gemeldet. Mit --repair wird die Paritaet aus
+        den Data-Members neu gebildet — die Daten gelten dabei als richtig.
+        Laeuft das Array degradiert, wird die Reparatur abgelehnt: Eine
+        Paritaet ueber einen unbrauchbaren Member zu bilden hiesse, die
+        Rekonstruktion aufzugeben.
+
+        Rueckgabewert: 0 stimmig, 1 Abweichungen gefunden, 2 nicht pruefbar.
+
+    ferrite replace <GERAET> [<GERAET> ...] --slot <N> --with <GERAET>
+                    [--force] [--yes]
+
+        Nimmt eine neue Platte als Ersatz fuer den ausgefallenen Slot <N>
+        auf. Angegeben werden die Geraete, die **noch da sind** — die
+        ausgefallene fehlt in der Liste. Danach steht der Slot als
+        unbrauchbar da und wartet auf `ferrite rebuild`.
+
+        Wie `create` standardmaessig ein Trockenlauf; erst --yes schreibt.
+
+    ferrite rebuild <GERAET> [<GERAET> ...] --slot <N> [--batch 64]
+
+        Stellt den Inhalt von Slot <N> aus der Paritaet wieder her. Der
+        Fortschritt steht im Superblock: Ein Abbruch kostet hoechstens
+        einen Durchgang, danach geht es dort weiter, wo es aufgehoert hat.
 
     ferrite help | version
 ";
