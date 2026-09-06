@@ -1,0 +1,12 @@
+[package]
+name = "ferrite-pool"
+description = "Der Pool-Namespace: Platzierungsregeln und Vereinigung mehrerer Data-Members zu einer Sicht."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Keine. Wie `format/` und `parity/`: Was hier steht, entscheidet — es oeffnet
+# nichts und haengt an nichts. Die FUSE-Schale kommt spaeter und bringt ihre
+# Dependencies fuer sich mit.
+[dependencies]

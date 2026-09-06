@@ -53,6 +53,10 @@ name = "ferrite-parity"
 version = "0.1.0"
 
 [[package]]
+name = "ferrite-pool"
+version = "0.1.0"
+
+[[package]]
 name = "io-uring"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

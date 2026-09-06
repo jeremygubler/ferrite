@@ -98,7 +98,8 @@ engine/   Planung von Schreibpfad und Rebuild — kein I/O            [fertig]
           Write-Back (braucht ehrliches Flush, Abschnitt 5.3)       [offen]
 broker/   btrfs-Scrub-Befund lesen, rekonstruieren, zurückschreiben [fertig]
           Lesefehler zur Laufzeit — braucht den Chunk-Baum           [offen]
-pool/     FUSE-Namespace mit Passthrough, Share-Policies            [offen]
+pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
+          FUSE-Schale mit Passthrough — Linux, Kernel ≥ 6.9         [offen]
 ctl/      gRPC-Daemon und CLI                                       [offen]
 ```
 

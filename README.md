@@ -116,7 +116,22 @@ Entwickler nie findet.
    Datei, nicht den auf der Platte, und ihn umzurechnen heißt, den Chunk-Baum von
    btrfs zu lesen. Bis dahin ist der Scrub der Weg — und der ist ohnehin das,
    was ein NAS regelmäßig laufen lässt.
-5. **Pool-Namespace.** FUSE-Passthrough, Share-Policies.
+5. **Pool-Namespace.** Ein Baum über alle Platten statt `Platte 3/Filme/`. Die
+   Regeln stehen und sind vollständig geprüft, ohne dass etwas gemountet
+   werden muss: wohin ein neues Objekt gehört (`MostFree`, `FillUp`,
+   `RoundRobin`, jeweils deterministisch), wie tief ein Verzeichnis über
+   Platten verteilt sein darf, wieviel Reserve frei bleibt, und was ein Name
+   bedeutet, den zwei Platten tragen.
+   Zwei Festlegungen tragen das Ganze. **Eine Datei liegt vollständig auf
+   genau einer Platte** — sonst wäre die Kerninvariante hin, denn eine Datei,
+   deren zweite Hälfte auf der verlorenen Platte lag, ist beim Ausbau nicht
+   mehr lesbar. Und **der Pool speichert nichts**: kein Index, keine
+   Zuordnungstabelle, nichts, dessen Verlust eine Platte unlesbar machte. Er
+   ist eine Sicht, kein Zustand.
+   Ein doppelter Dateiname wird deterministisch bedient und **gemeldet**, statt
+   still nach Plattenreihenfolge aufgelöst zu werden — das ist die Ursache der
+   scheinbar wiederauferstandenen Dateien, die man aus Unraid kennt.
+   Offen bleibt die FUSE-Schale, die diese Entscheidungen ausführt.
 6. **Control plane und UI.**
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
@@ -137,7 +152,7 @@ von Anfang an mitläuft.
 | `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion, Rebuild, Recovery und Reparatur mit Gegenprobe — 153 Tests grün (143 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
-| `pool/` | offen |
+| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 67 Tests grün, dependency- und I/O-frei. FUSE-Schale offen |
 | `ctl/` | offen |
 
 ```

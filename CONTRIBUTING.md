@@ -17,8 +17,9 @@ darauf ab, wovon du nur eine Kopie hast.
 
 **Ohne jede Hardware.** Der grösste Teil des Projekts ist reine Rechnung und
 läuft auf jedem Rechner: `format/` beschreibt Bytes, `parity/` rechnet, `engine/`
-plant, `broker/` liest die Befunde von btrfs, `integration/` spielt alles
-gegeneinander durch. Zusammen 305 Tests und sechs Fuzz-Targets, alle ohne Platte.
+plant, `broker/` liest die Befunde von btrfs, `pool/` entscheidet über die
+Platzierung, `integration/` spielt alles gegeneinander durch. Zusammen 372 Tests
+und sechs Fuzz-Targets, alle ohne Platte.
 
 Das ist Absicht. Ein Speicherprojekt, an dem man nur mit sechs Festplatten im
 Keller mitarbeiten kann, bekommt keine Mitarbeiter.
