@@ -177,8 +177,16 @@ Entwickler nie findet.
    ein Ferrite-Superblock liegt, wird abgelehnt. `status` gibt seinen Befund
    auch als Rückgabewert zurück — 0 heil, 1 degradiert, 2 nicht
    zusammensetzbar —, denn ein Monitoring liest keinen Text.
-   Offen bleibt der laufende Betrieb: ein Prozess, der die ublk-Geräte
-   bereitstellt und den Pool einhängt. Und danach der Daemon samt Web-UI.
+   `ferrite run` nimmt das Array in Betrieb: spielt das Log zurück, stellt je
+   Data-Slot ein Blockgerät bereit und hängt auf Wunsch den Pool darüber. Der
+   ganze Stapel **läuft in CI**, von außen wie ein Nutzer ihn bedient — Array
+   anlegen, starten, `mkfs.btrfs` auf die entstandenen Geräte, Datei in den
+   Pool schreiben, **beenden**, neu starten, Datei wiederfinden. Der Neustart
+   in der Mitte ist der Punkt: Ohne ihn könnte alles aus einem Cache kommen.
+   Formatiert wird dabei nie von selbst. Ein Member ohne Dateisystem wird
+   gemeldet — wer die falsche Platte angeschlossen hat, soll sie wiederbekommen.
+   Offen bleiben Kommandos für Scrub und Rebuild und danach der Daemon samt
+   Web-UI.
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
 
@@ -199,7 +207,7 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
-| `ctl/` | Das Werkzeug `ferrite`: Array anlegen und Zustand ansehen — 56 Tests grün, davon 13 gegen das echte Binary. Laufender Betrieb und Web-UI offen |
+| `ctl/` | Das Werkzeug `ferrite`: Array anlegen, Zustand ansehen, in Betrieb nehmen — 61 Tests grün, davon 13 gegen das echte Binary ohne Root. Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Daemon und Web-UI offen |
 
 ```
 cargo test
@@ -224,6 +232,17 @@ Erst dasselbe Kommando mit `--yes` legt an. Danach:
 ```bash
 cargo run -p ferrite-ctl -- status /tmp/*.img
 ```
+
+Und in Betrieb nehmen — **das** braucht Linux mit `ublk_drv` und Root:
+
+```bash
+sudo ferrite run /tmp/a.img /tmp/b.img /tmp/p.img /tmp/q.img /tmp/log.img
+```
+
+Je Data-Slot erscheint ein `/dev/ublkbN`. Was darauf kommt, entscheidest du:
+einmalig `mkfs.btrfs`, dann mit `--pool /mnt/pool` starten, und Ferrite hängt
+die Members ein und den vereinigten Baum darüber. Beendet wird mit Strg-C;
+ausgehängt und abgebaut wird dabei in umgekehrter Reihenfolge.
 
 Die Fuzz-Targets liegen in `format/fuzz/` und brauchen eine Nightly-Toolchain
 plus `cargo-fuzz`. Bei jedem Push läuft eine 60-Sekunden-Rauchprobe pro Target,

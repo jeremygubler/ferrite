@@ -200,6 +200,16 @@ jobs:
           cargo test -p ferrite-harness --test btrfs_repair --no-run
           sudo -E $(cargo test -p ferrite-harness --test btrfs_repair --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*btrfs_repair[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
 
+      # Der Durchstich von aussen: `ferrite create`, `ferrite run`, btrfs auf
+      # den entstandenen Blockgeraeten, der Pool darueber, eine Datei
+      # hineingeschrieben — und nach einem Neustart wieder herausgelesen. Das
+      # ist der Weg, den ein Nutzer geht.
+      - name: Das Werkzeug am ganzen Stapel
+        run: |
+          sudo modprobe fuse || true
+          cargo test -p ferrite-ctl --test serve --no-run
+          sudo -E $(cargo test -p ferrite-ctl --test serve --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*serve[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
+
       # Ein abgebrochener Test kann ein Geraet zurueckgelassen haben. Auf einem
       # Runner ist das folgenlos, aber es soll im Log stehen.
       - name: Reste melden

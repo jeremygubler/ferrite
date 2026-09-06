@@ -30,6 +30,9 @@ pub mod report;
 /// Blockgeraeten.
 #[cfg(unix)]
 pub mod run;
+/// Der laufende Betrieb. Braucht ublk und FUSE und damit Linux.
+#[cfg(target_os = "linux")]
+pub mod serve;
 
-pub use args::{parse, ArgError, Command, CreatePlan, StatusRequest, HELP};
+pub use args::{parse, ArgError, Command, CreatePlan, RunPlan, StatusRequest, HELP};
 pub use report::{status, Health, Report, Seen};

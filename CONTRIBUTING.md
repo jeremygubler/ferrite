@@ -10,8 +10,10 @@ in [`CLAUDE.md`](CLAUDE.md) — die Datei ist an ein Werkzeug adressiert, gilt a
 für alle. Bei Widersprüchen zwischen dieser Datei hier und `CLAUDE.md` gewinnt
 `CLAUDE.md`.
 
-**Ferrite kann noch keine Daten speichern.** Es gibt kein Blockgerät. Lege nichts
-darauf ab, wovon du nur eine Kopie hast.
+**Ferrite speichert Daten, aber niemand hat es im Alltag benutzt.** `ferrite
+create` legt ein Array an, `ferrite run` stellt die Blockgeräte bereit und hängt
+den Pool ein, und der ganze Weg läuft in CI durch. Was fehlt, sind Monate auf
+echter Hardware. Lege nichts darauf ab, wovon du nur eine Kopie hast.
 
 ## Wo du anfangen kannst
 
@@ -19,7 +21,7 @@ darauf ab, wovon du nur eine Kopie hast.
 läuft auf jedem Rechner: `format/` beschreibt Bytes, `parity/` rechnet, `engine/`
 plant, `broker/` liest die Befunde von btrfs, `pool/` entscheidet über die
 Platzierung, `ctl/` bedient das Ganze, `integration/` spielt alles
-gegeneinander durch. Zusammen 425 Tests und sechs Fuzz-Targets, alle ohne
+gegeneinander durch. Zusammen 430 Tests und sechs Fuzz-Targets, alle ohne
 Platte.
 
 Das ist Absicht. Ein Speicherprojekt, an dem man nur mit sechs Festplatten im

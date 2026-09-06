@@ -42,6 +42,25 @@ pub enum CtlError {
     Engine(EngineError),
     /// Der Zufallsgenerator des Betriebssystems war nicht zu erreichen.
     NoRandomness(std::io::ErrorKind),
+    /// Eine Voraussetzung des laufenden Betriebs fehlt.
+    Missing {
+        what: &'static str,
+    },
+    /// Auf dem Blockgeraet liegt kein Dateisystem der erwarteten Art.
+    ///
+    /// Eigene Variante und keine `Mount`-Meldung mit `EINVAL`: Das ist der
+    /// Fall, in dem ein `mkfs` verlockend waere, und er gehoert so deutlich
+    /// benannt, dass niemand ihn mit einem defekten Geraet verwechselt.
+    NoFilesystem {
+        device: String,
+        fstype: String,
+    },
+    Mount {
+        path: PathBuf,
+        kind: std::io::ErrorKind,
+        raw_os_error: Option<i32>,
+    },
+    Pool(ferrite_pool::PoolError),
 }
 
 impl fmt::Display for CtlError {
@@ -59,6 +78,23 @@ impl fmt::Display for CtlError {
                 f,
                 "/dev/urandom nicht lesbar ({kind:?}) — ohne Zufall keine eindeutigen UUIDs"
             ),
+            Self::Missing { what } => write!(f, "{what}"),
+            Self::NoFilesystem { device, fstype } => write!(
+                f,
+                "auf {device} liegt kein {fstype}.\n\
+                 Ferrite formatiert nicht von selbst — wer das Geraet neu anlegen will, ruft\n\
+                 `mkfs.{fstype} {device}` auf. Wer es nicht will, hat vielleicht die falsche\n\
+                 Platte erwischt."
+            ),
+            Self::Mount {
+                path,
+                kind,
+                raw_os_error,
+            } => match raw_os_error {
+                Some(code) => write!(f, "{}: {kind:?} (errno {code})", path.display()),
+                None => write!(f, "{}: {kind:?}", path.display()),
+            },
+            Self::Pool(error) => write!(f, "{error}"),
         }
     }
 }

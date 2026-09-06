@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         }
         Command::Create(plan) => execute_create(&plan),
         Command::Status(request) => execute_status(&request.devices),
+        Command::Run(plan) => execute_run(&plan),
     }
 }
 
@@ -74,5 +75,23 @@ fn execute_create(_plan: &ferrite_ctl::CreatePlan) -> ExitCode {
 #[cfg(not(unix))]
 fn execute_status(_devices: &[std::path::PathBuf]) -> ExitCode {
     eprintln!("ferrite status braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+/// `run` gibt es nur, wo es ublk und FUSE gibt.
+#[cfg(target_os = "linux")]
+fn execute_run(plan: &ferrite_ctl::RunPlan) -> ExitCode {
+    match ferrite_ctl::serve::run(plan) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn execute_run(_plan: &ferrite_ctl::RunPlan) -> ExitCode {
+    eprintln!("ferrite run braucht Linux mit ublk_drv und /dev/fuse.");
     ExitCode::from(EXIT_USAGE)
 }

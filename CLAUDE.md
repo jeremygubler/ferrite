@@ -103,9 +103,8 @@ pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
           FUSE-Schale, Lesen und Schreiben — /dev/fuse, mount(2)   [fertig]
           Passthrough — Kernel ≥ 6.9                                [offen]
           xattrs und Sperren — erst entscheiden, dann bauen          [offen]
-ctl/      `ferrite create` und `ferrite status` — kein Daemon      [fertig]
-          Laufender Betrieb: ublk-Geräte und Pool einhängen          [offen]
-          gRPC-Daemon und Web-UI                                     [offen]
+ctl/      `ferrite create`, `status` und `run` — kein Daemon        [fertig]
+          gRPC-Daemon, Web-UI, Scrub- und Rebuild-Kommandos          [offen]
 ```
 
 Reihenfolge der Meilensteine steht im README. Sie ist bewusst so gewählt: Das

@@ -22,6 +22,8 @@ version = "0.1.0"
 dependencies = [
  "ferrite-engine",
  "ferrite-format",
+ "ferrite-pool",
+ "libc",
 ]
 
 [[package]]
