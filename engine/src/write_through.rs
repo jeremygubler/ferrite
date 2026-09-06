@@ -57,7 +57,7 @@ use core::ops::Range;
 
 use ferrite_format::superblock::{MemberState, Role, Superblock};
 use ferrite_format::FormatError;
-use ferrite_parity::{compute_p, compute_q, gf, reconstruct_from_p, Slot};
+use ferrite_parity::{compute_p, compute_q, gf, reconstruct_from_p, reconstruct_from_q, Slot};
 
 use crate::device::{write_superblock, MemberDevice};
 use crate::error::{EngineError, Result};
@@ -348,26 +348,8 @@ impl ArrayWriter {
         let target = self.member(slot_index)?;
         self.check_within(target, offset, out.len())?;
 
-        let mut contents = Vec::with_capacity(self.data.len());
-        for (index, member) in self.data.iter().enumerate() {
-            if index == usize::from(slot_index) {
-                contents.push(Vec::new());
-                continue;
-            }
-            if !member.is_valid_over(offset, out.len(), self.block_size_log2) {
-                return Err(EngineError::CannotRebuild { role: Role::Data });
-            }
-            let mut buffer = vec![0u8; out.len()];
-            member.read_extended(offset, &mut buffer)?;
-            contents.push(buffer);
-        }
-
-        let survivors: Vec<Slot<'_>> = contents
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != usize::from(slot_index))
-            .map(|(index, data)| Slot::new(index as u8, data).map_err(EngineError::from_parity))
-            .collect::<Result<_>>()?;
+        let contents = self.survivor_contents(slot_index, offset, out.len())?;
+        let survivors = survivor_slots(&contents, slot_index)?;
 
         let mut parity = vec![0u8; out.len()];
         self.parity_p.read_extended(offset, &mut parity)?;
@@ -379,6 +361,99 @@ impl ArrayWriter {
             out,
         )
         .map_err(EngineError::from_parity)
+    }
+
+    /// Dieselbe Rekonstruktion, aber aus Q statt aus P.
+    ///
+    /// Allein taugt sie zu nichts, was `reconstruct` nicht auch koennte — ihr
+    /// Zweck ist der Vergleich in [`ArrayWriter::reconstruct_verified`].
+    fn reconstruct_via_q(&self, slot_index: u16, offset: u64, out: &mut [u8]) -> Result<()> {
+        let target = self.member(slot_index)?;
+        self.check_within(target, offset, out.len())?;
+
+        let contents = self.survivor_contents(slot_index, offset, out.len())?;
+        let survivors = survivor_slots(&contents, slot_index)?;
+
+        let mut parity = vec![0u8; out.len()];
+        self.read_parity_q(offset, &mut parity)?;
+        reconstruct_from_q(
+            self.data_slot_count(),
+            slot_index as u8,
+            &survivors,
+            &parity,
+            out,
+        )
+        .map_err(EngineError::from_parity)
+    }
+
+    /// Liest alle Data-Members ausser `slot_index`.
+    ///
+    /// An dessen Stelle steht ein leerer Vektor: Er ist die Unbekannte, sein
+    /// Inhalt auf der Platte gilt hier gerade nicht.
+    fn survivor_contents(&self, slot_index: u16, offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
+        let mut contents = Vec::with_capacity(self.data.len());
+        for (index, member) in self.data.iter().enumerate() {
+            if index == usize::from(slot_index) {
+                contents.push(Vec::new());
+                continue;
+            }
+            if !member.is_valid_over(offset, len, self.block_size_log2) {
+                return Err(EngineError::CannotRebuild { role: Role::Data });
+            }
+            let mut buffer = vec![0u8; len];
+            member.read_extended(offset, &mut buffer)?;
+            contents.push(buffer);
+        }
+        Ok(contents)
+    }
+
+    /// Rekonstruiert einen Bereich **und weist nach, dass das Ergebnis stimmt**.
+    ///
+    /// # Warum das gewoehnliche `reconstruct` hier nicht reicht
+    ///
+    /// Es nimmt an, dass alles ausser dem Zielslot heil ist. Bei einem
+    /// ausgefallenen Member ist das die richtige Annahme: Er ist als
+    /// unbrauchbar gemeldet, alle anderen haben sich nicht gemeldet.
+    ///
+    /// Bei Bit-Rot ist sie es nicht. Da hat sich nichts gemeldet, sondern
+    /// still verfaelscht — und ob es der Data-Member war oder P, weiss
+    /// zunaechst niemand. Wer nur aus P rekonstruierte und das Ergebnis
+    /// zurueckschriebe, machte aus einem angefressenen Paritaetsblock einen
+    /// angefressenen Datenblock: aus einem behebbaren Fehler echten
+    /// Datenverlust.
+    ///
+    /// # Warum zwei Wege genuegen
+    ///
+    /// Gerechnet wird zweimal, aus P und aus Q. Ist genau **eine** Quelle
+    /// verfaelscht, fallen die Ergebnisse byteweise auseinander:
+    ///
+    /// * P angefressen um `d` → aus P kommt `D ^ d`, aus Q kommt `D`.
+    /// * Q angefressen um `d` → aus P kommt `D`, aus Q kommt `D ^ g⁻ʲ·d`.
+    /// * Ein anderer Data-Slot `k` angefressen um `d` → aus P kommt `D ^ d`,
+    ///   aus Q kommt `D ^ g^(k-j)·d`. Gleich waeren sie nur bei `g^(k-j) = 1`,
+    ///   also `k = j` — und `k` ist gerade nicht `j`.
+    ///
+    /// Zwei gleichzeitig verfaelschte Quellen koennen sich theoretisch
+    /// gegenseitig decken (`d_P = g⁻ʲ·d_Q`). Das ist kein Beweis mehr, sondern
+    /// eine Wahrscheinlichkeitsaussage — deshalb steht es hier und nicht als
+    /// Zusicherung.
+    pub fn reconstruct_verified(&self, slot_index: u16, offset: u64, out: &mut [u8]) -> Result<()> {
+        if self.parity_q.is_none() {
+            return Err(EngineError::NoSecondSource);
+        }
+
+        self.reconstruct(slot_index, offset, out)?;
+        let mut from_q = vec![0u8; out.len()];
+        self.reconstruct_via_q(slot_index, offset, &mut from_q)?;
+
+        if from_q != out {
+            return Err(EngineError::AmbiguousReconstruction {
+                slot_index,
+                offset,
+                len: out.len(),
+            });
+        }
+        Ok(())
     }
 
     /// Liest aus dem ParityP-Member, zero-extended.
@@ -781,6 +856,64 @@ impl ArrayWriter {
         self.recompute_parity(offset, len)
     }
 
+    // --- Reparatur --------------------------------------------------------
+
+    /// Holt einen angefressenen Bereich eines Data-Members aus der Redundanz
+    /// zurueck.
+    ///
+    /// Das ist der Griff, den der Repair-Broker benutzt: btrfs meldet einen
+    /// Block, dessen Pruefsumme nicht mehr passt, und hier kommt sein Inhalt
+    /// zurueck auf die Platte.
+    ///
+    /// # Warum die Paritaet dabei unberuehrt bleibt
+    ///
+    /// Sie ist hier nicht Mitschrift, sondern Quelle. Gebildet wurde sie ueber
+    /// den **richtigen** Inhalt; verfaelscht ist allein, was auf dem
+    /// Data-Member steht. Liefe dieser Write ueber den gewoehnlichen
+    /// Schreibpfad, rechnete der `P_neu = P_alt ^ D_rostig ^ D_gut` und faltete
+    /// den Rost damit in die Paritaet ein. Danach waere die letzte gute Kopie
+    /// weg — der Schreibpfad haette den Schaden vollendet, den er beheben soll.
+    ///
+    /// # Warum kein Log-Eintrag
+    ///
+    /// Ein Absturz mitten in der Reparatur hinterlaesst den Member halb
+    /// repariert. Das ist derselbe Zustand wie vorher, nur kleiner: Die
+    /// Paritaet stimmt weiterhin, und ein zweiter Anlauf rechnet dasselbe noch
+    /// einmal aus. Der Vorgang ist wiederholbar, und Wiederholbares braucht
+    /// kein Log.
+    pub fn repair(&mut self, slot_index: u16, offset: u64, len: usize) -> Result<Repair> {
+        let member = self.member(slot_index)?;
+        self.check_within(member, offset, len)?;
+
+        // Traegt der Slot hier ohnehin keine gueltigen Daten, werden Reads
+        // bereits rekonstruiert und der Rebuild schreibt den Bereich sowieso
+        // neu. Eine Einzelreparatur waere Arbeit ohne Wirkung — und wuerde
+        // oberhalb des `rebuild_progress` vom Rebuild gleich ueberschrieben.
+        if !member.is_valid_over(offset, len, self.block_size_log2) {
+            return Ok(Repair::LeftToRebuild);
+        }
+
+        let mut good = vec![0u8; len];
+        self.reconstruct_verified(slot_index, offset, &mut good)?;
+
+        let member = self.member(slot_index)?;
+        let mut found = vec![0u8; len];
+        let intact = match member.read_extended(offset, &mut found) {
+            Ok(()) => found == good,
+            // Der Block gibt nichts mehr her. In Ordnung ist er damit sicher
+            // nicht, und der Vergleich eruebrigt sich.
+            Err(EngineError::Io { .. }) => false,
+            Err(other) => return Err(other),
+        };
+        if intact {
+            return Ok(Repair::AlreadyIntact);
+        }
+
+        member.write_within(offset, &good)?;
+        member.flush()?;
+        Ok(Repair::Written { len })
+    }
+
     /// Prueft, dass die Paritaet zum Inhalt der Data-Members passt.
     ///
     /// Fuer Tests und spaeter fuer den Scrub. Nicht fuer den Schreibpfad — dort
@@ -975,6 +1108,33 @@ fn checkpoint_before_parity() -> bool {
 #[cfg(not(all(target_os = "linux", feature = "crash-points")))]
 fn checkpoint_before_parity() -> bool {
     false
+}
+
+/// Baut die Slot-Sicht auf alle Data-Members ausser dem gesuchten.
+fn survivor_slots(contents: &[Vec<u8>], target: u16) -> Result<Vec<Slot<'_>>> {
+    contents
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != usize::from(target))
+        .map(|(index, data)| Slot::new(index as u8, data).map_err(EngineError::from_parity))
+        .collect()
+}
+
+/// Was eine Reparatur ergeben hat.
+///
+/// Als eigener Typ und nicht als `bool`: Ein Broker, der Meldungen abarbeitet,
+/// muss die drei Faelle auseinanderhalten koennen — sonst zaehlt er
+/// Reparaturen, die keine waren.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repair {
+    /// Der Bereich stand bereits richtig auf der Platte. Entweder war der Rost
+    /// woanders, oder jemand war schneller.
+    AlreadyIntact,
+    /// Der Bereich wurde aus der Redundanz zurueckgeholt und ist durable.
+    Written { len: usize },
+    /// Der Slot traegt hier ohnehin keine gueltigen Daten. Reads werden bereits
+    /// rekonstruiert, den Bereich schreibt der Rebuild neu.
+    LeftToRebuild,
 }
 
 /// Ein Bereich, dessen Inhalt beim Recovery verlorengegangen ist.

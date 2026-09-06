@@ -44,6 +44,19 @@ pub enum EngineError {
     CheckpointBeforeParity {
         stage: crate::write_path::BatchStage,
     },
+    /// P und Q ergeben fuer denselben Bereich verschiedene Inhalte.
+    ///
+    /// Damit ist mehr als eine Quelle beschaedigt. Welche, sagen zwei
+    /// Gleichungen mit zwei Unbekannten nicht — eine Reparatur waere geraten
+    /// und schriebe im Zweifel Muell ueber die letzte gute Kopie.
+    AmbiguousReconstruction {
+        slot_index: u16,
+        offset: u64,
+        len: usize,
+    },
+    /// Ohne ParityQ gibt es nur eine Quelle fuer den fehlenden Slot und damit
+    /// keine Moeglichkeit zu pruefen, ob sie selbst noch stimmt.
+    NoSecondSource,
     /// Der Bereich liegt jenseits des Geraeteendes.
     BeyondDevice { offset: u64, len: u64, size: u64 },
     /// Schreibversuch auf einen nur lesend geoeffneten Member.
@@ -117,6 +130,18 @@ impl fmt::Display for EngineError {
             Self::CheckpointBeforeParity { stage } => write!(
                 f,
                 "Checkpoint bei Stufe {stage:?}, die Paritaet ist noch nicht durable"
+            ),
+            Self::AmbiguousReconstruction {
+                slot_index,
+                offset,
+                len,
+            } => write!(
+                f,
+                "Slot {slot_index} bei Offset {offset} ueber {len} Bytes: P und Q ergeben Verschiedenes, es ist mehr als eine Quelle beschaedigt"
+            ),
+            Self::NoSecondSource => write!(
+                f,
+                "ohne ParityQ laesst sich eine Rekonstruktion nicht gegenpruefen"
             ),
             Self::BeyondDevice { offset, len, size } => write!(
                 f,

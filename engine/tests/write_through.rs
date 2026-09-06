@@ -13,7 +13,7 @@ use std::fs::File;
 use std::path::PathBuf;
 
 use ferrite_engine::{
-    member_for, ArrayWriter, DeviceLog, DiskRebuild, EngineError, Member, MemberDevice,
+    member_for, ArrayWriter, DeviceLog, DiskRebuild, EngineError, Member, MemberDevice, Repair,
 };
 use ferrite_format::superblock::{MemberState, Role, Superblock, DEFAULT_PAYLOAD_OFFSET};
 use ferrite_format::{LogRing, Uuid};
@@ -645,4 +645,223 @@ fn an_empty_write_changes_nothing() {
     let before = writer.log().next_seq();
     writer.write(0, 0, &[]).unwrap();
     assert_eq!(writer.log().next_seq(), before, "kein Record fuer nichts");
+}
+
+// --- Reparatur von Bit-Rot ------------------------------------------------
+//
+// Die Frage ist hier eine andere als im Rest der Datei. Oben geht es darum, ob
+// die Paritaet nach einem Write stimmt. Hier stimmt sie — verfaelscht ist,
+// was auf einer Platte steht, und niemand hat es veranlasst. Der gefaehrliche
+// Fehler ist deshalb nicht die missglueckte Reparatur, sondern die
+// zuversichtliche: eine, die aus einer angefressenen Paritaet einen
+// angefressenen Datenblock macht und dabei die letzte gute Kopie ueberschreibt.
+
+/// Der Geraeteindex eines Members im von `build` angelegten Array.
+///
+/// `build` legt die Geraete in dieser Reihenfolge an: Log, Data 0..n, P, Q.
+fn device_index(data_count: usize, role: Role, slot: u16) -> usize {
+    match role {
+        Role::Log => 0,
+        Role::Data => 1 + usize::from(slot),
+        Role::ParityP => 1 + data_count,
+        Role::ParityQ => 2 + data_count,
+    }
+}
+
+/// Kippt Bytes direkt auf der Platte, am Schreibpfad vorbei.
+///
+/// Genau so sieht Bit-Rot aus: Der Inhalt aendert sich, ohne dass ihn jemand
+/// geaendert haette. Ein Test, der stattdessen ueber `write` ginge, pruefte den
+/// Schreibpfad und nicht die Reparatur — die Paritaet zoege naemlich mit.
+fn rot(scratch: &Scratch, index: usize, offset: u64, len: usize) {
+    let device = MemberDevice::open(&scratch.paths[index]).expect("Geraet oeffnen");
+    let at = DEFAULT_PAYLOAD_OFFSET + offset;
+    let mut bytes = vec![0u8; len];
+    device.read_at(at, &mut bytes).expect("lesen");
+    for byte in bytes.iter_mut() {
+        *byte ^= 0xA5;
+    }
+    device.write_at(at, &bytes).expect("schreiben");
+    device.flush().expect("flushen");
+}
+
+/// Ein Array mit drei Data-Slots, P und Q, auf denen etwas steht.
+fn seeded(scratch: &mut Scratch) -> ArrayWriter {
+    let mut writer = build(scratch, &[BLOCK; 3], true);
+    for slot in 0..3u16 {
+        writer
+            .write(slot, 0, &pattern(slot as u8 + 1, 8192))
+            .expect("Grundinhalt schreiben");
+    }
+    writer
+}
+
+#[test]
+fn bit_rot_on_a_data_member_is_repaired_from_the_redundancy() {
+    let mut scratch = Scratch::new("rot-daten");
+    let mut writer = seeded(&mut scratch);
+    let expected = pattern(1, 8192);
+
+    rot(&scratch, device_index(3, Role::Data, 0), 4096, 512);
+
+    // Erst der Nachweis, dass der Rost wirklich auf der Platte liegt: Ein
+    // Test, der sich das schenkt, koennte alles Folgende auch dann bestehen,
+    // wenn gar nichts verfaelscht wurde.
+    let mut found = vec![0u8; 8192];
+    writer.read(0, 0, &mut found).expect("lesen");
+    assert_ne!(found, expected, "der Rost ist nicht angekommen");
+
+    assert_eq!(
+        writer.repair(0, 4096, 512).expect("reparieren"),
+        Repair::Written { len: 512 }
+    );
+
+    writer
+        .read(0, 0, &mut found)
+        .expect("nach der Reparatur lesen");
+    assert_eq!(found, expected, "der Inhalt ist nicht zurueck");
+    assert!(
+        writer.verify_parity(0, 8192).expect("Paritaet pruefen"),
+        "die Reparatur hat die Paritaet verstellt"
+    );
+}
+
+#[test]
+fn a_repair_leaves_the_parity_untouched() {
+    let mut scratch = Scratch::new("rot-paritaet-bleibt");
+    let mut writer = seeded(&mut scratch);
+
+    let mut p_before = vec![0u8; 8192];
+    let mut q_before = vec![0u8; 8192];
+    writer.read_parity_p(0, &mut p_before).expect("P lesen");
+    writer.read_parity_q(0, &mut q_before).expect("Q lesen");
+
+    rot(&scratch, device_index(3, Role::Data, 2), 0, 4096);
+    writer.repair(2, 0, 4096).expect("reparieren");
+
+    let mut p_after = vec![0u8; 8192];
+    let mut q_after = vec![0u8; 8192];
+    writer.read_parity_p(0, &mut p_after).expect("P lesen");
+    writer.read_parity_q(0, &mut q_after).expect("Q lesen");
+
+    // Die Paritaet war hier die Quelle, nicht die Mitschrift. Wer sie
+    // nachzieht, faltet den Rost in sie ein.
+    assert_eq!(p_before, p_after, "P wurde nachgezogen");
+    assert_eq!(q_before, q_after, "Q wurde nachgezogen");
+}
+
+#[test]
+fn bit_rot_in_the_parity_is_not_written_into_the_data() {
+    let mut scratch = Scratch::new("rot-in-p");
+    let mut writer = seeded(&mut scratch);
+    let expected = pattern(1, 8192);
+
+    // Diesmal ist der Data-Member heil und P angefressen. Wer nur aus P
+    // rekonstruierte, bekaeme Muell und schriebe ihn ueber gute Daten.
+    rot(&scratch, device_index(3, Role::ParityP, 0), 4096, 512);
+
+    let error = writer.repair(0, 4096, 512).expect_err("darf nicht raten");
+    assert_eq!(
+        error,
+        EngineError::AmbiguousReconstruction {
+            slot_index: 0,
+            offset: 4096,
+            len: 512,
+        }
+    );
+
+    let mut found = vec![0u8; 8192];
+    writer.read(0, 0, &mut found).expect("lesen");
+    assert_eq!(found, expected, "die guten Daten wurden ueberschrieben");
+}
+
+#[test]
+fn bit_rot_in_another_member_is_noticed_and_the_right_one_is_repaired() {
+    let mut scratch = Scratch::new("rot-nachbar");
+    let mut writer = seeded(&mut scratch);
+
+    rot(&scratch, device_index(3, Role::Data, 1), 4096, 512);
+
+    // Slot 0 ist heil, aber die Rekonstruktion braeuchte Slot 1 als Quelle —
+    // und der luegt. Aus P und aus Q kaeme Verschiedenes.
+    let error = writer.repair(0, 4096, 512).expect_err("darf nicht raten");
+    assert!(
+        matches!(
+            error,
+            EngineError::AmbiguousReconstruction { slot_index: 0, .. }
+        ),
+        "unerwartet: {error}"
+    );
+
+    // Fuer den Slot, der wirklich angefressen ist, sind alle Quellen heil.
+    assert_eq!(
+        writer.repair(1, 4096, 512).expect("reparieren"),
+        Repair::Written { len: 512 }
+    );
+
+    let mut found = vec![0u8; 8192];
+    writer.read(1, 0, &mut found).expect("lesen");
+    assert_eq!(found, pattern(2, 8192));
+    assert!(writer.verify_parity(0, 8192).expect("Paritaet pruefen"));
+}
+
+#[test]
+fn a_repair_of_an_intact_range_writes_nothing() {
+    let mut scratch = Scratch::new("rot-nichts");
+    let mut writer = seeded(&mut scratch);
+
+    assert_eq!(
+        writer.repair(0, 4096, 512).expect("reparieren"),
+        Repair::AlreadyIntact,
+        "hier war nichts zu tun"
+    );
+}
+
+#[test]
+fn a_second_repair_finds_nothing_left_to_do() {
+    let mut scratch = Scratch::new("rot-zweimal");
+    let mut writer = seeded(&mut scratch);
+
+    rot(&scratch, device_index(3, Role::Data, 0), 0, 1024);
+    assert_eq!(
+        writer.repair(0, 0, 1024).expect("erste Reparatur"),
+        Repair::Written { len: 1024 }
+    );
+    // Wiederholbarkeit ist der Grund, warum die Reparatur ohne Log auskommt:
+    // Ein Absturz mittendrin laesst sich durch einen zweiten Anlauf beheben.
+    assert_eq!(
+        writer.repair(0, 0, 1024).expect("zweite Reparatur"),
+        Repair::AlreadyIntact
+    );
+}
+
+#[test]
+fn without_parity_q_a_repair_is_refused() {
+    let mut scratch = Scratch::new("rot-ohne-q");
+    let mut writer = build(&mut scratch, &[BLOCK; 3], false);
+    writer.write(0, 0, &pattern(7, 4096)).expect("schreiben");
+
+    rot(&scratch, device_index(3, Role::Data, 0), 0, 512);
+
+    // Mit P allein liesse sich rekonstruieren — aber nicht pruefen, ob P
+    // selbst noch stimmt. Melden statt raten.
+    assert_eq!(
+        writer.repair(0, 0, 512).expect_err("darf nicht raten"),
+        EngineError::NoSecondSource
+    );
+}
+
+#[test]
+fn a_range_the_rebuild_still_owes_is_left_to_the_rebuild() {
+    let mut scratch = Scratch::new("rot-im-rebuild");
+    let mut writer = seeded(&mut scratch);
+    writer
+        .mark_member(0, MemberState::Stale, 0)
+        .expect("Member melden");
+
+    assert_eq!(
+        writer.repair(0, 0, 512).expect("reparieren"),
+        Repair::LeftToRebuild,
+        "eine Einzelreparatur unterhalb des Rebuild-Fortschritts ist wirkungslos"
+    );
 }
