@@ -3,10 +3,12 @@
 
 //! Der Zugriff auf einen einzelnen Branch — das btrfs eines Data-Members.
 //!
-//! Fast alles hier geht ueber `std`: `symlink_metadata`, `read_dir`,
-//! `read_link`, `File`. Das ist kein Geiz mit `unsafe`, sondern der Grund,
-//! warum es hier ueberhaupt keins braucht — nur `statvfs` hat in `std` keine
-//! Entsprechung.
+//! Was `std` anbietet, wird von dort genommen: `symlink_metadata`,
+//! `read_dir`, `read_link`, `File`. Der Rest geht nicht anders — `std` kennt
+//! weder `statvfs` noch `mknod`, `lchown`, `utimensat` oder `symlink` mit
+//! Zielpruefung. Diese Aufrufe stehen deshalb hier zusammen und nirgends
+//! sonst: Jeder ist eine Zeile `unsafe`, und sie alle an einer Stelle zu
+//! haben heisst, dass man sie an einer Stelle nachlesen kann.
 //!
 //! # Warum `symlink_metadata` und nicht `metadata`
 //!
@@ -15,9 +17,10 @@
 //! Symlink, der auf `/etc` zeigt, waere damit ein Loch aus dem Pool heraus.
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::{File, Metadata};
 use std::os::unix::fs::{DirEntryExt, MetadataExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::branch::BranchId;
 use crate::error::{PoolError, Result};
@@ -177,17 +180,206 @@ pub fn open(branch: &BranchRoot, relative: &str, flags: i32) -> Result<File> {
         .map_err(io_error("Datei oeffnen"))
 }
 
+/// Legt eine neue Datei an und oeffnet sie.
+///
+/// `O_EXCL`: Ob die Datei schon da ist, hat der Pool ueber alle Branches
+/// geprueft — aber zwischen Pruefung und Anlegen kann jemand dazwischenkommen.
+/// Ohne `O_EXCL` ueberschriebe dieser Aufruf sie stillschweigend.
+pub fn create_file(branch: &BranchRoot, relative: &str, mode: u32, flags: i32) -> Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true).mode(mode);
+    let passed = flags & (libc::O_APPEND | libc::O_NOATIME);
+    options.custom_flags(passed);
+    options
+        .open(branch.resolve(relative))
+        .map_err(io_error("Datei anlegen"))
+}
+
+/// Legt ein Verzeichnis an, ohne Vorfahren.
+pub fn make_dir(branch: &BranchRoot, relative: &str, mode: u32) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::mkdir(path.as_ptr(), mode as libc::mode_t) },
+        "Verzeichnis anlegen",
+    )
+}
+
+/// Legt einen FIFO oder Socket an.
+///
+/// Geraeteknoten bleiben aussen vor: Der Pool haengt mit `MS_NODEV`, dort
+/// waeren sie ohnehin wirkungslos — aber auf der Platte laegen sie weiter, und
+/// wer die Platte spaeter direkt einhaengt, faende ein Geraet, das er nicht
+/// angelegt hat.
+pub fn make_node(branch: &BranchRoot, relative: &str, mode: u32) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::mknod(path.as_ptr(), mode as libc::mode_t, 0) },
+        "Knoten anlegen",
+    )
+}
+
+pub fn make_symlink(branch: &BranchRoot, relative: &str, target: &[u8]) -> Result<()> {
+    let target = CString::new(target).map_err(|_| PoolError::InvalidPath {
+        reason: "Nullbyte im Symlink-Ziel",
+    })?;
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::symlink(target.as_ptr(), path.as_ptr()) },
+        "Symlink anlegen",
+    )
+}
+
+pub fn make_link(branch: &BranchRoot, from: &str, to: &str) -> Result<()> {
+    let from = c_path(&branch.resolve(from))?;
+    let to = c_path(&branch.resolve(to))?;
+    check(
+        unsafe { libc::link(from.as_ptr(), to.as_ptr()) },
+        "Hardlink anlegen",
+    )
+}
+
+pub fn remove_file(branch: &BranchRoot, relative: &str) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(unsafe { libc::unlink(path.as_ptr()) }, "Datei loeschen")
+}
+
+pub fn remove_dir(branch: &BranchRoot, relative: &str) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::rmdir(path.as_ptr()) },
+        "Verzeichnis loeschen",
+    )
+}
+
+pub fn move_within(branch: &BranchRoot, from: &str, to: &str) -> Result<()> {
+    let from = c_path(&branch.resolve(from))?;
+    let to = c_path(&branch.resolve(to))?;
+    check(
+        unsafe { libc::rename(from.as_ptr(), to.as_ptr()) },
+        "umbenennen",
+    )
+}
+
+pub fn set_mode(branch: &BranchRoot, relative: &str, mode: u32) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::chmod(path.as_ptr(), mode as libc::mode_t) },
+        "Modus setzen",
+    )
+}
+
+/// Setzt Eigentuemer und Gruppe, **ohne** einem Symlink zu folgen.
+///
+/// `lchown` und nicht `chown`: Sonst aenderte ein `chown` auf einen Symlink
+/// den Eigentuemer seines Ziels — und das Ziel kann ausserhalb des Pools
+/// liegen.
+pub fn set_owner(
+    branch: &BranchRoot,
+    relative: &str,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    // `-1` heisst „unveraendert lassen".
+    let uid = uid.unwrap_or(u32::MAX);
+    let gid = gid.unwrap_or(u32::MAX);
+    check(
+        unsafe { libc::lchown(path.as_ptr(), uid, gid) },
+        "Eigentuemer setzen",
+    )
+}
+
+pub fn truncate(branch: &BranchRoot, relative: &str, size: u64) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::truncate(path.as_ptr(), size as libc::off_t) },
+        "Groesse setzen",
+    )
+}
+
+/// „Diesen Zeitstempel nicht anfassen."
+const UTIME_OMIT: i64 = (1 << 30) - 2;
+/// „Diesen Zeitstempel auf jetzt setzen."
+const UTIME_NOW: i64 = (1 << 30) - 1;
+
+/// Eine Zeitangabe fuer [`set_times`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timestamp {
+    Keep,
+    Now,
+    At(i64, u32),
+}
+
+impl Timestamp {
+    fn to_timespec(self) -> libc::timespec {
+        match self {
+            Timestamp::Keep => libc::timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
+            Timestamp::Now => libc::timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            },
+            Timestamp::At(seconds, nanos) => libc::timespec {
+                tv_sec: seconds,
+                tv_nsec: i64::from(nanos),
+            },
+        }
+    }
+}
+
+pub fn set_times(
+    branch: &BranchRoot,
+    relative: &str,
+    atime: Timestamp,
+    mtime: Timestamp,
+) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    let times = [atime.to_timespec(), mtime.to_timespec()];
+    check(
+        unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                path.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        },
+        "Zeitstempel setzen",
+    )
+}
+
+/// Uebertraegt Modus, Eigentuemer und Gruppe von einem Branch auf einen
+/// anderen.
+///
+/// Gebraucht, wenn ein Verzeichnis auf einem zweiten Branch entsteht, weil
+/// dort eine neue Datei hingehoert. Ohne das truege dieselbe Verzeichnis auf
+/// zwei Platten verschiedene Rechte — und welche gelten, haengt davon ab,
+/// welcher Branch die Auskunft gerade bedient.
+pub fn clone_metadata(from: &Metadata, to: &BranchRoot, relative: &str) -> Result<()> {
+    set_mode(to, relative, from.mode() & 0o7777)?;
+    set_owner(to, relative, Some(from.uid()), Some(from.gid()))
+}
+
+/// Was `statvfs` ueber einen Branch sagt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Space {
+    pub total: u64,
+    pub free: u64,
+    /// Das Dateisystem ist nur lesend eingehaengt.
+    ///
+    /// Ein solcher Branch nimmt nichts Neues auf. Wer das erst beim Schreiben
+    /// merkt, hat die Datei schon platziert und muss zuruecknehmen, was auf
+    /// halbem Weg entstanden ist.
+    pub read_only: bool,
+}
+
 /// Der freie und der gesamte Platz eines Branches, in Bytes.
 ///
 /// `statvfs` ist der einzige Aufruf hier, fuer den `std` nichts anbietet.
-pub fn space(branch: &BranchRoot) -> Result<(u64, u64)> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let path =
-        CString::new(branch.root.as_os_str().as_bytes()).map_err(|_| PoolError::InvalidPath {
-            reason: "Nullbyte im Branch-Pfad",
-        })?;
+pub fn space(branch: &BranchRoot) -> Result<Space> {
+    let path = c_path(&branch.root)?;
     let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(path.as_ptr(), &mut raw) } != 0 {
         let error = std::io::Error::last_os_error();
@@ -206,11 +398,13 @@ pub fn space(branch: &BranchRoot) -> Result<(u64, u64)> {
     } else {
         raw.f_bsize as u64
     };
-    let total = (raw.f_blocks as u64).saturating_mul(unit);
-    // `f_bavail` und nicht `f_bfree`: Der fuer Root reservierte Teil steht
-    // einem Share nicht zur Verfuegung.
-    let free = (raw.f_bavail as u64).saturating_mul(unit);
-    Ok((total, free))
+    Ok(Space {
+        total: (raw.f_blocks as u64).saturating_mul(unit),
+        // `f_bavail` und nicht `f_bfree`: Der fuer Root reservierte Teil steht
+        // einem Share nicht zur Verfuegung.
+        free: (raw.f_bavail as u64).saturating_mul(unit),
+        read_only: raw.f_flag & libc::ST_RDONLY != 0,
+    })
 }
 
 /// Die Auflistungen aller Branches, in der Form, die `merge_listing` erwartet.
@@ -238,6 +432,28 @@ pub fn list_all(branches: &[BranchRoot], relative: &str) -> (Listings, InoMap) {
     (listings, inos)
 }
 
+/// Ein Pfad als nullterminierte Zeichenkette fuer die Systemaufrufe, fuer die
+/// `std` nichts anbietet.
+fn c_path(path: &Path) -> Result<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| PoolError::InvalidPath {
+        reason: "Nullbyte im Pfad",
+    })
+}
+
+/// Wandelt den Rueckgabewert eines Systemaufrufs in ein `Result`.
+fn check(result: libc::c_int, what: &'static str) -> Result<()> {
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(PoolError::Io {
+            what,
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+        });
+    }
+    Ok(())
+}
+
 fn io_error(what: &'static str) -> impl FnOnce(std::io::Error) -> PoolError {
     move |error| PoolError::Io {
         what,
@@ -260,7 +476,6 @@ pub fn errno_of(error: &PoolError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn the_root_itself_resolves_to_the_root() {

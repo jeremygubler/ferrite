@@ -131,18 +131,30 @@ Entwickler nie findet.
    Ein doppelter Dateiname wird deterministisch bedient und **gemeldet**, statt
    still nach Plattenreihenfolge aufgelöst zu werden — das ist die Ursache der
    scheinbar wiederauferstandenen Dateien, die man aus Unraid kennt.
-   Der **Lesepfad ist eingehängt und läuft in CI**: `/dev/fuse` und `mount(2)`
-   von Hand, ohne libfuse und ohne `fusermount3`, weil der spätere Passthrough
-   den Datenpfad aus diesem Prozess herausnehmen muss und eine Bindung, die ihn
-   selbst in der Hand hält, ihn nicht abgeben kann. Auflisten, lesen, `stat`,
-   Symlinks, `df` — geprüft über `std::fs` und damit über dieselben
-   Systemaufrufe, die jedes andere Programm auch benutzt.
+   Der Pool ist **eingehängt und beschreibbar, und das läuft in CI**:
+   `/dev/fuse` und `mount(2)` von Hand, ohne libfuse und ohne `fusermount3`,
+   weil der spätere Passthrough den Datenpfad aus diesem Prozess herausnehmen
+   muss und eine Bindung, die ihn selbst in der Hand hält, ihn nicht abgeben
+   kann. Auflisten, lesen, schreiben, anlegen, löschen, umbenennen, Rechte und
+   Zeitstempel — geprüft über `std::fs` und damit über dieselben Systemaufrufe,
+   die jedes andere Programm auch benutzt. Die Platzierungsregeln greifen dabei
+   wirklich: Wo eine neue Datei landet, entscheidet die Policy, und die Tests
+   sehen danach auf den Platten selbst nach.
+   Zwei Dinge tut der Pool anders als Unraid. **Gelöscht wird auf jeder
+   Platte**, die den Namen trägt — sonst taucht die zweite Kopie beim nächsten
+   Blick wieder auf. Und **beim Umbenennen wird weggeräumt, was am Ziel im Weg
+   lag**: Bliebe es stehen, lieferte der Pool danach den alten Inhalt, weil die
+   Platte mit dem kleineren Index zuerst bedient.
    Dabei ist eine Falle umgangen, in die vereinigende Dateisysteme regelmäßig
    treten: Zwei Platten vergeben ihre Inode-Nummern unabhängig voneinander, und
    wer sie durchreicht, zeigt zwei verschiedene Dateien mit derselben Nummer —
    `tar` und `rsync` halten sie dann für Hardlinks und speichern die zweite als
    Verweis auf die erste. Ferrite vergibt eigene, poolweit eindeutige Nummern.
-   Offen bleiben der Schreibpfad und der Passthrough.
+   Offen bleibt der Passthrough — bis dahin geht jedes Byte durch den
+   Userspace; richtig ist das Ergebnis auch so, nur langsamer. Ebenso offen:
+   erweiterte Attribute und Sperren. Eine ACL, die nur auf einer von mehreren
+   Platten eines Verzeichnisses liegt, gilt je nachdem, welche gerade bedient —
+   das gehört entschieden, bevor es gebaut wird.
 6. **Control plane und UI.**
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
@@ -163,7 +175,7 @@ von Anfang an mitläuft.
 | `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion, Rebuild, Recovery und Reparatur mit Gegenprobe — 153 Tests grün (143 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
-| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 93 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`: 10 Tests an einem echt eingehängten Pool, in CI. Schreibpfad und Passthrough offen |
+| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
 | `ctl/` | offen |
 
 ```

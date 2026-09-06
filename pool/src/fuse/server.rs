@@ -33,16 +33,18 @@
 
 use std::collections::HashMap;
 use std::fs::{File, Metadata};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 
-use crate::branch::BranchId;
+use crate::branch::{Branch, BranchId};
 use crate::error::{PoolError, Result};
 use crate::fuse::abi;
-use crate::fuse::backing::{self, BranchRoot};
+use crate::fuse::backing::{self, BranchRoot, Timestamp};
 use crate::fuse::connection::{Connection, MAX_WRITE};
 use crate::fuse::inode::{InodeTable, ROOT};
 use crate::merge::{merge_listing, resolve, BranchEntry, EntryKind};
-use crate::path::depth_of;
+use crate::path::{ancestor_at, depth_of};
+use crate::place::{place, PlacementRequest};
+use crate::policy::SharePolicy;
 
 /// Eine Antwort: Nutzlast oder ein **negativer** `errno`.
 type Answer = std::result::Result<Vec<u8>, i32>;
@@ -68,20 +70,25 @@ struct Listed {
 #[derive(Debug)]
 pub struct PoolFs {
     branches: Vec<BranchRoot>,
+    policy: SharePolicy,
     inodes: InodeTable,
     files: HashMap<u64, File>,
     dirs: HashMap<u64, Vec<Listed>>,
     next_fh: u64,
+    /// Der zuletzt benutzte Branch, fuer [`Allocation::RoundRobin`].
+    cursor: Option<BranchId>,
 }
 
 impl PoolFs {
-    pub fn new(branches: Vec<BranchRoot>) -> Self {
+    pub fn new(branches: Vec<BranchRoot>, policy: SharePolicy) -> Self {
         PoolFs {
             branches,
+            policy,
             inodes: InodeTable::new(),
             files: HashMap::new(),
             dirs: HashMap::new(),
             next_fh: 1,
+            cursor: None,
         }
     }
 
@@ -150,7 +157,21 @@ impl PoolFs {
             abi::FUSE_OPEN => Some(self.open(header.nodeid, data)),
             abi::FUSE_READ => Some(self.read(data)),
             abi::FUSE_RELEASE => Some(self.release(data)),
-            abi::FUSE_FLUSH | abi::FUSE_FSYNC | abi::FUSE_FSYNCDIR => Some(Ok(Vec::new())),
+            abi::FUSE_FLUSH | abi::FUSE_FSYNCDIR => Some(Ok(Vec::new())),
+            abi::FUSE_FSYNC => Some(self.fsync(data)),
+
+            // --- Schreiben ---
+            abi::FUSE_CREATE => Some(self.create(header, data)),
+            abi::FUSE_MKDIR => Some(self.mkdir(header, data)),
+            abi::FUSE_MKNOD => Some(self.mknod(header, data)),
+            abi::FUSE_SYMLINK => Some(self.symlink(header, data)),
+            abi::FUSE_LINK => Some(self.link(header, data)),
+            abi::FUSE_WRITE => Some(self.write(data)),
+            abi::FUSE_UNLINK => Some(self.unlink(header.nodeid, data)),
+            abi::FUSE_RMDIR => Some(self.rmdir(header.nodeid, data)),
+            abi::FUSE_RENAME => Some(self.rename(header.nodeid, data, false)),
+            abi::FUSE_RENAME2 => Some(self.rename(header.nodeid, data, true)),
+            abi::FUSE_SETATTR => Some(self.setattr(header.nodeid, data)),
 
             // Alles andere kann dieser Server noch nicht. `ENOSYS` und nicht
             // `EIO`: Der Kernel merkt sich, dass es diese Operation nicht
@@ -364,6 +385,536 @@ impl PoolFs {
         Ok(Vec::new())
     }
 
+    // --- Anlegen ----------------------------------------------------------
+
+    fn create(&mut self, header: &abi::InHeader, data: &[u8]) -> Answer {
+        let Some(request) = abi::CreateIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let name = name_of(data.get(abi::CreateIn::SIZE..).ok_or(-libc::EINVAL)?)?;
+        let path = self.child_path(header.nodeid, name)?;
+        let flags = request.flags as i32;
+
+        // Da? Dann ist das kein Anlegen, sondern ein Oeffnen — es sei denn,
+        // der Aufrufer bestand auf `O_EXCL`.
+        if let Some(branch) = self.serving_branch(&path) {
+            if flags & libc::O_EXCL != 0 {
+                return Err(-libc::EEXIST);
+            }
+            let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
+            let file = backing::open(&root, &path, flags).map_err(|e| backing::errno_of(&e))?;
+            return self.opened(&path, file);
+        }
+
+        let branch = self.place_at(&path, 0)?;
+        self.ensure_parents(branch, &path)?;
+        let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
+        let file = backing::create_file(&root, &path, request.mode, flags)
+            .map_err(|e| backing::errno_of(&e))?;
+        self.give_to_caller(&root, &path, header)?;
+        self.opened(&path, file)
+    }
+
+    fn mkdir(&mut self, header: &abi::InHeader, data: &[u8]) -> Answer {
+        let Some(request) = abi::MkdirIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let name = name_of(data.get(abi::MkdirIn::SIZE..).ok_or(-libc::EINVAL)?)?;
+        let path = self.child_path(header.nodeid, name)?;
+        if !self.look_all(&path).is_empty() {
+            return Err(-libc::EEXIST);
+        }
+
+        // Auf **einen** Branch, nicht auf alle. Ein Verzeichnis ueberall
+        // anzulegen machte die Split-Regel bedeutungslos: Jeder Vorfahre
+        // laege dann auf jeder Platte, und nichts bliebe mehr zusammen.
+        let branch = self.place_at(&path, 0)?;
+        self.ensure_parents(branch, &path)?;
+        let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
+        backing::make_dir(&root, &path, request.mode).map_err(|e| backing::errno_of(&e))?;
+        self.give_to_caller(&root, &path, header)?;
+        self.entry_reply(&path)
+    }
+
+    fn mknod(&mut self, header: &abi::InHeader, data: &[u8]) -> Answer {
+        let Some(request) = abi::MknodIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let name = name_of(data.get(abi::MknodIn::SIZE..).ok_or(-libc::EINVAL)?)?;
+
+        // Geraeteknoten nicht. Der Pool haengt mit `MS_NODEV`, dort waeren sie
+        // wirkungslos — auf der Platte laegen sie aber weiter, und wer diese
+        // Platte spaeter direkt einhaengt, faende ein Geraet, das er nie
+        // angelegt hat.
+        let kind = request.mode & libc::S_IFMT;
+        if kind == libc::S_IFBLK || kind == libc::S_IFCHR {
+            return Err(-libc::EPERM);
+        }
+
+        let path = self.child_path(header.nodeid, name)?;
+        if !self.look_all(&path).is_empty() {
+            return Err(-libc::EEXIST);
+        }
+        let branch = self.place_at(&path, 0)?;
+        self.ensure_parents(branch, &path)?;
+        let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
+        backing::make_node(&root, &path, request.mode).map_err(|e| backing::errno_of(&e))?;
+        self.give_to_caller(&root, &path, header)?;
+        self.entry_reply(&path)
+    }
+
+    fn symlink(&mut self, header: &abi::InHeader, data: &[u8]) -> Answer {
+        let Some((name, target)) = abi::two_names(data) else {
+            return Err(-libc::EINVAL);
+        };
+        if target.is_empty() {
+            return Err(-libc::EINVAL);
+        }
+        let name = std::str::from_utf8(name).map_err(|_| -libc::EINVAL)?;
+        let path = self.child_path(header.nodeid, name)?;
+        if !self.look_all(&path).is_empty() {
+            return Err(-libc::EEXIST);
+        }
+
+        let branch = self.place_at(&path, 0)?;
+        self.ensure_parents(branch, &path)?;
+        let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
+        // Das Ziel wird **nicht** geprueft: Ein Symlink darf ins Leere zeigen,
+        // und ein Ziel ausserhalb des Pools loest der Kernel im Kontext des
+        // Aufrufers auf, nicht in unserem.
+        backing::make_symlink(&root, &path, target).map_err(|e| backing::errno_of(&e))?;
+        self.give_to_caller(&root, &path, header)?;
+        self.entry_reply(&path)
+    }
+
+    fn link(&mut self, new_parent: &abi::InHeader, data: &[u8]) -> Answer {
+        let Some(old) = abi::link_oldnodeid(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let name = name_of(data.get(8..).ok_or(-libc::EINVAL)?)?;
+        let from = self.path_of(old)?;
+        let to = self.child_path(new_parent.nodeid, name)?;
+
+        // Ein Hardlink kann das Dateisystem nicht verlassen, und jeder Branch
+        // ist ein eigenes. Er muss also dorthin, wo das Original liegt — die
+        // Platzierungsregel hat hier nichts zu entscheiden.
+        let Some(branch) = self.serving_branch(&from) else {
+            return Err(-libc::ENOENT);
+        };
+        if !self.look_all(&to).is_empty() {
+            return Err(-libc::EEXIST);
+        }
+        self.ensure_parents(branch, &to)?;
+        let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
+        backing::make_link(&root, &from, &to).map_err(|e| backing::errno_of(&e))?;
+        self.entry_reply(&to)
+    }
+
+    // --- Schreiben --------------------------------------------------------
+
+    fn write(&mut self, data: &[u8]) -> Answer {
+        let Some(request) = abi::WriteIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let payload = data
+            .get(abi::WriteIn::SIZE..)
+            .ok_or(-libc::EINVAL)?
+            .get(..request.size as usize)
+            .ok_or(-libc::EINVAL)?;
+        let Some(file) = self.files.get(&request.fh) else {
+            return Err(-libc::EBADF);
+        };
+
+        let mut written = 0usize;
+        while written < payload.len() {
+            match file.write_at(&payload[written..], request.offset + written as u64) {
+                // Kein Fortschritt und kein Fehler: Die Platte nimmt nichts
+                // mehr. Als `ENOSPC` melden statt endlos zu drehen.
+                Ok(0) => return Err(-libc::ENOSPC),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(-error.raw_os_error().unwrap_or(libc::EIO)),
+            }
+        }
+        Ok(abi::write_out(written as u32).into_bytes())
+    }
+
+    fn fsync(&mut self, data: &[u8]) -> Answer {
+        if data.len() < 12 {
+            return Err(-libc::EINVAL);
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&data[..8]);
+        let fh = u64::from_ne_bytes(raw);
+        let mut flags = [0u8; 4];
+        flags.copy_from_slice(&data[8..12]);
+        let datasync = u32::from_ne_bytes(flags) & 1 != 0;
+
+        let Some(file) = self.files.get(&fh) else {
+            return Err(-libc::EBADF);
+        };
+        // Bei `datasync` reichen die Nutzdaten; sonst muessen auch die
+        // Metadaten stehen. Beides an das darunterliegende Dateisystem
+        // weiterzugeben ist der ganze Sinn eines `fsync` — hier `Ok` zu
+        // melden, ohne etwas zu tun, waere eine Zusage ohne Deckung.
+        let result = if datasync {
+            file.sync_data()
+        } else {
+            file.sync_all()
+        };
+        result.map_err(|error| -error.raw_os_error().unwrap_or(libc::EIO))?;
+        Ok(Vec::new())
+    }
+
+    // --- Loeschen ---------------------------------------------------------
+
+    fn unlink(&mut self, parent: u64, data: &[u8]) -> Answer {
+        let name = name_of(data)?;
+        let path = self.child_path(parent, name)?;
+
+        // Von **jedem** Branch, der ihn traegt. Wer nur den bedienenden
+        // loescht, laesst die zweite Datei wieder auftauchen — genau das
+        // Verhalten, das der Pool an anderer Stelle als Konflikt meldet.
+        let carriers = self.carriers(&path);
+        if carriers.is_empty() {
+            return Err(-libc::ENOENT);
+        }
+        let mut first_error = None;
+        for branch in carriers {
+            let Some(root) = self.branch(branch).cloned() else {
+                continue;
+            };
+            if let Err(error) = backing::remove_file(&root, &path) {
+                first_error.get_or_insert(backing::errno_of(&error));
+            }
+        }
+        match first_error {
+            Some(errno) => Err(errno),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn rmdir(&mut self, parent: u64, data: &[u8]) -> Answer {
+        let name = name_of(data)?;
+        let path = self.child_path(parent, name)?;
+        let carriers = self.carriers(&path);
+        if carriers.is_empty() {
+            return Err(-libc::ENOENT);
+        }
+
+        // Erst alle pruefen, dann alle loeschen. Andersherum stuende nach
+        // einem `ENOTEMPTY` die Haelfte des Verzeichnisses nicht mehr da.
+        for branch in &carriers {
+            let Some(root) = self.branch(*branch) else {
+                continue;
+            };
+            if !backing::list(root, &path).is_empty() {
+                return Err(-libc::ENOTEMPTY);
+            }
+        }
+
+        let mut first_error = None;
+        for branch in carriers {
+            let Some(root) = self.branch(branch).cloned() else {
+                continue;
+            };
+            if let Err(error) = backing::remove_dir(&root, &path) {
+                first_error.get_or_insert(backing::errno_of(&error));
+            }
+        }
+        match first_error {
+            Some(errno) => Err(errno),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    // --- Umbenennen -------------------------------------------------------
+
+    /// # Warum das nicht atomar ist
+    ///
+    /// `rename(2)` auf einem Dateisystem ist atomar. Ueber mehrere Platten
+    /// hinweg gibt es das nicht: Traegt der Name mehrere Branches, sind es
+    /// mehrere Aufrufe, und dazwischen kann der Strom ausfallen.
+    ///
+    /// Umbenannt wird deshalb **zuerst**, und erst danach wird geraeumt, was
+    /// am Ziel im Weg lag. Bricht es beim Umbenennen ab, ist das Ziel
+    /// unberuehrt — so wie es `rename` zusagt. Bricht es beim Raeumen ab,
+    /// liegt der Name doppelt, und das meldet der Pool als Konflikt statt es
+    /// zu verstecken. Von beiden Fehlerbildern ist das zweite das bessere.
+    fn rename(&mut self, parent: u64, data: &[u8], with_flags: bool) -> Answer {
+        let Some(request) = abi::RenameIn::decode(data, with_flags) else {
+            return Err(-libc::EINVAL);
+        };
+        let Some((old, new)) = abi::two_names(data.get(request.names_at..).ok_or(-libc::EINVAL)?)
+        else {
+            return Err(-libc::EINVAL);
+        };
+        let old = std::str::from_utf8(old).map_err(|_| -libc::EINVAL)?;
+        let new = std::str::from_utf8(new).map_err(|_| -libc::EINVAL)?;
+
+        let from = self.child_path(parent, old)?;
+        let to = self.child_path(request.newdir, new)?;
+
+        const RENAME_NOREPLACE: u32 = 1;
+        const RENAME_EXCHANGE: u32 = 2;
+        if request.flags & RENAME_EXCHANGE != 0 {
+            // Zwei Namen zu tauschen, die auf verschiedenen Platten liegen,
+            // hiesse zwei Dateien zu verschieben — und das ist kein Tausch
+            // mehr, sondern ein Kopiervorgang mit einem Fenster dazwischen.
+            return Err(-libc::EINVAL);
+        }
+
+        let carriers = self.carriers(&from);
+        if carriers.is_empty() {
+            return Err(-libc::ENOENT);
+        }
+        let occupied = self.carriers(&to);
+        if request.flags & RENAME_NOREPLACE != 0 && !occupied.is_empty() {
+            return Err(-libc::EEXIST);
+        }
+
+        for branch in &carriers {
+            self.ensure_parents(*branch, &to)?;
+            let Some(root) = self.branch(*branch).cloned() else {
+                continue;
+            };
+            backing::move_within(&root, &from, &to).map_err(|e| backing::errno_of(&e))?;
+        }
+
+        // Was am Ziel lag und nicht mitgezogen ist, verdeckte sonst das
+        // Ergebnis — auf einem Branch mit kleinerem Index sogar bevorzugt.
+        for branch in occupied {
+            if carriers.contains(&branch) {
+                continue;
+            }
+            let Some(root) = self.branch(branch).cloned() else {
+                continue;
+            };
+            let is_dir = backing::look(&root, &to).map(|meta| meta.is_dir()) == Some(true);
+            let _ = if is_dir {
+                backing::remove_dir(&root, &to)
+            } else {
+                backing::remove_file(&root, &to)
+            };
+        }
+
+        self.inodes.rename(&from, &to);
+        Ok(Vec::new())
+    }
+
+    // --- Attribute setzen -------------------------------------------------
+
+    fn setattr(&mut self, nodeid: u64, data: &[u8]) -> Answer {
+        let Some(request) = abi::SetattrIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let path = self.path_of(nodeid)?;
+        let carriers = self.carriers(&path);
+        if carriers.is_empty() {
+            return Err(-libc::ENOENT);
+        }
+
+        for branch in &carriers {
+            let Some(root) = self.branch(*branch).cloned() else {
+                continue;
+            };
+            // Auf **allen** Branches, die den Namen tragen. Ein Verzeichnis
+            // liegt oft auf mehreren; haetten die verschiedene Rechte, haenge
+            // es vom bedienenden Branch ab, welche gelten.
+            if request.has(abi::FATTR_MODE) {
+                backing::set_mode(&root, &path, request.mode).map_err(|e| backing::errno_of(&e))?;
+            }
+            if request.has(abi::FATTR_UID) || request.has(abi::FATTR_GID) {
+                backing::set_owner(
+                    &root,
+                    &path,
+                    request.has(abi::FATTR_UID).then_some(request.uid),
+                    request.has(abi::FATTR_GID).then_some(request.gid),
+                )
+                .map_err(|e| backing::errno_of(&e))?;
+            }
+            if request.has(abi::FATTR_ATIME) || request.has(abi::FATTR_MTIME) {
+                backing::set_times(
+                    &root,
+                    &path,
+                    stamp(
+                        request.has(abi::FATTR_ATIME),
+                        request.has(abi::FATTR_ATIME_NOW),
+                        request.atime,
+                        request.atimensec,
+                    ),
+                    stamp(
+                        request.has(abi::FATTR_MTIME),
+                        request.has(abi::FATTR_MTIME_NOW),
+                        request.mtime,
+                        request.mtimensec,
+                    ),
+                )
+                .map_err(|e| backing::errno_of(&e))?;
+            }
+            if request.has(abi::FATTR_SIZE) {
+                backing::truncate(&root, &path, request.size).map_err(|e| backing::errno_of(&e))?;
+            }
+        }
+
+        self.getattr(nodeid)
+    }
+
+    // --- Platzierung ------------------------------------------------------
+
+    /// Waehlt den Branch fuer ein neues Objekt.
+    ///
+    /// Der freie Platz wird **jetzt** gemessen und nicht gemerkt: Eine
+    /// zwischengespeicherte Zahl fuehrte dazu, dass der Pool eine Platte fuer
+    /// leer haelt, die gerade vollgelaufen ist — und das ENOSPC kaeme dann
+    /// mitten im Schreiben statt vorher.
+    fn place_at(&mut self, path: &str, needed: u64) -> std::result::Result<BranchId, i32> {
+        let branches = self.branches_now();
+        let anchors = self.anchors_for(path);
+        let mut request = PlacementRequest::new(path)
+            .with_anchors(&anchors)
+            .with_needed(needed);
+        if let Some(cursor) = self.cursor {
+            request = request.with_cursor(cursor);
+        }
+
+        let placement = place(&branches, &self.policy, &request).map_err(|error| {
+            // `NoBranch` heisst hier: keine Platte ist beschreibbar. Fuer
+            // einen Aufrufer ist das `ENOSPC` — er kann nichts ablegen.
+            backing::errno_of(&error)
+        })?;
+        self.cursor = Some(placement.cursor);
+        Ok(placement.branch)
+    }
+
+    /// Der Zustand der Branches, wie ihn die Platzierung braucht.
+    ///
+    /// Ein Branch, dessen `statvfs` scheitert, faellt heraus: Eine Platte, die
+    /// gerade nicht antwortet, soll nichts Neues bekommen.
+    fn branches_now(&self) -> Vec<Branch> {
+        self.branches
+            .iter()
+            .filter_map(|root| {
+                let space = backing::space(root).ok()?;
+                let mut branch = Branch::new(root.id, space.total, space.free);
+                if space.read_only {
+                    branch = branch.read_only();
+                }
+                Some(branch)
+            })
+            .collect()
+    }
+
+    /// Die Branches, die den von der Split-Regel gemeinten Vorfahren tragen.
+    fn anchors_for(&self, path: &str) -> Vec<BranchId> {
+        let Some(depth) = self.policy.split_depth() else {
+            return Vec::new();
+        };
+        let Some(ancestor) = ancestor_at(path, depth) else {
+            return Vec::new();
+        };
+        self.carriers(ancestor)
+    }
+
+    /// Legt die fehlenden Vorfahren auf dem Zielbranch an.
+    ///
+    /// Modus, Eigentuemer und Gruppe kommen dabei von dem Branch, der das
+    /// Verzeichnis bisher bedient. Ohne das truege dasselbe Verzeichnis auf
+    /// zwei Platten verschiedene Rechte, und welche gelten, haenge davon ab,
+    /// welche Platte die Auskunft gerade gibt — und das aendert sich, sobald
+    /// die andere geloescht wird.
+    fn ensure_parents(&mut self, branch: BranchId, path: &str) -> std::result::Result<(), i32> {
+        let Some(root) = self.branch(branch).cloned() else {
+            return Err(-libc::ENOENT);
+        };
+        let depth = depth_of(path).map_err(|_| -libc::EINVAL)?;
+
+        for level in 1..depth {
+            let Some(ancestor) = ancestor_at(path, level) else {
+                break;
+            };
+            if backing::look(&root, ancestor).is_some() {
+                continue;
+            }
+            // Der Vorfahre existiert im Pool — sonst haette der Kernel diesen
+            // Aufruf gar nicht schicken koennen —, nur eben nicht hier.
+            let Some(source) = self.serving_branch(ancestor) else {
+                return Err(-libc::ENOENT);
+            };
+            let Some(from) = self.branch(source).cloned() else {
+                return Err(-libc::ENOENT);
+            };
+            let Some(metadata) = backing::look(&from, ancestor) else {
+                return Err(-libc::ENOENT);
+            };
+            backing::make_dir(&root, ancestor, metadata.mode() & 0o7777)
+                .map_err(|e| backing::errno_of(&e))?;
+            backing::clone_metadata(&metadata, &root, ancestor)
+                .map_err(|e| backing::errno_of(&e))?;
+        }
+        Ok(())
+    }
+
+    /// Uebertraegt ein frisch angelegtes Objekt an den Aufrufer.
+    ///
+    /// Der Server laeuft als Root; ohne das gehoerte jede neue Datei Root,
+    /// egal wer sie angelegt hat. Auf einem NAS, hinter dem Samba und NFS mit
+    /// eigenen Nutzern stehen, waere das nicht bloss unschoen — der Nutzer
+    /// koennte seine eigene Datei danach nicht mehr aendern.
+    fn give_to_caller(
+        &self,
+        root: &BranchRoot,
+        path: &str,
+        header: &abi::InHeader,
+    ) -> std::result::Result<(), i32> {
+        backing::set_owner(root, path, Some(header.uid), Some(header.gid))
+            .map_err(|e| backing::errno_of(&e))
+    }
+
+    /// Die Antwort auf eine Anfrage, die ein Objekt angelegt hat.
+    fn entry_reply(&mut self, path: &str) -> Answer {
+        let found = self.look_all(path);
+        let resolution = resolve(&entries_of(&found));
+        let Some(branch) = resolution.served_by() else {
+            return Err(-libc::ENOENT);
+        };
+        let metadata = found
+            .iter()
+            .find(|(id, _)| *id == branch)
+            .map(|(_, metadata)| metadata)
+            .ok_or(-libc::ENOENT)?;
+
+        let nodeid = self.inodes.lookup(path);
+        let attr = backing::attr_of(metadata, nodeid);
+        Ok(abi::entry_out(nodeid, &attr, CACHE_SECONDS).into_bytes())
+    }
+
+    /// Die Antwort auf ein `CREATE`: Eintrag und offene Datei in einem.
+    fn opened(&mut self, path: &str, file: File) -> Answer {
+        let metadata = file
+            .metadata()
+            .map_err(|error| -error.raw_os_error().unwrap_or(libc::EIO))?;
+        let nodeid = self.inodes.lookup(path);
+        let attr = backing::attr_of(&metadata, nodeid);
+        let fh = self.take_fh();
+        self.files.insert(fh, file);
+        Ok(abi::create_out(nodeid, &attr, CACHE_SECONDS, fh).into_bytes())
+    }
+
+    /// Welcher Branch diesen Pfad bedient, falls einer.
+    fn serving_branch(&self, path: &str) -> Option<BranchId> {
+        resolve(&entries_of(&self.look_all(path))).served_by()
+    }
+
+    /// Alle Branches, die diesen Pfad tragen.
+    fn carriers(&self, path: &str) -> Vec<BranchId> {
+        self.branches
+            .iter()
+            .filter(|branch| backing::look(branch, path).is_some())
+            .map(|branch| branch.id)
+            .collect()
+    }
+
     // --- Der ganze Pool ---------------------------------------------------
 
     fn statfs(&mut self) -> Answer {
@@ -375,14 +926,14 @@ impl PoolFs {
         let mut total = 0u64;
         let mut free = 0u64;
         for branch in &self.branches {
-            let Ok((branch_total, branch_free)) = backing::space(branch) else {
+            let Ok(space) = backing::space(branch) else {
                 // Eine Platte, die gerade nicht antwortet, macht den Pool
                 // nicht kleiner, als er ist — sie fehlt in der Summe. Der
                 // Fehler gehoert in die Control plane, nicht in ein `df`.
                 continue;
             };
-            total = total.saturating_add(branch_total / UNIT);
-            free = free.saturating_add(branch_free / UNIT);
+            total = total.saturating_add(space.total / UNIT);
+            free = free.saturating_add(space.free / UNIT);
         }
         Ok(abi::statfs_out(total, free, free, 0, 0, UNIT as u32, 255, UNIT as u32).into_bytes())
     }
@@ -447,6 +998,19 @@ fn dirent_type(kind: EntryKind) -> u32 {
         EntryKind::Other => libc::DT_UNKNOWN,
     };
     u32::from(raw)
+}
+
+/// Uebersetzt die drei Faelle eines Zeitstempels aus einem `SETATTR`.
+///
+/// Nicht gesetzt heisst **nicht anfassen** und nicht „auf null setzen": Wer
+/// beim `chmod` einer Datei nebenbei ihr Aenderungsdatum verliert, hat den
+/// Unterschied uebersehen.
+fn stamp(present: bool, now: bool, seconds: i64, nanos: u32) -> Timestamp {
+    match (present, now) {
+        (false, _) => Timestamp::Keep,
+        (true, true) => Timestamp::Now,
+        (true, false) => Timestamp::At(seconds, nanos),
+    }
 }
 
 /// Der nullterminierte Name am Anfang der Nutzlast.

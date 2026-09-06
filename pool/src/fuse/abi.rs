@@ -85,6 +85,8 @@ pub const ATTR_OUT_SIZE: usize = 104;
 pub const OPEN_OUT_SIZE: usize = 16;
 pub const KSTATFS_SIZE: usize = 80;
 pub const DIRENT_HEADER_SIZE: usize = 24;
+pub const WRITE_OUT_SIZE: usize = 8;
+pub const CREATE_OUT_SIZE: usize = ENTRY_OUT_SIZE + OPEN_OUT_SIZE;
 
 /// Wieviele Bytes der Antwort auf `FUSE_INIT` geschrieben werden.
 ///
@@ -218,6 +220,176 @@ pub fn batch_forget(bytes: &[u8]) -> Vec<(u64, u64)> {
         forgets.push((u64_at(bytes, at), u64_at(bytes, at + 8)));
     }
     forgets
+}
+
+/// `struct fuse_create_in`, gefolgt vom Namen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateIn {
+    pub flags: u32,
+    pub mode: u32,
+}
+
+impl CreateIn {
+    pub const SIZE: usize = 16;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        // `umask` bei Offset 8 wird nicht gebraucht: Ohne `FUSE_DONT_MASK`
+        // hat der Kernel sie schon auf `mode` angewandt. Sie hier noch einmal
+        // anzuwenden zoege jede neue Datei ein zweites Mal ab.
+        Some(CreateIn {
+            flags: u32_at(bytes, 0),
+            mode: u32_at(bytes, 4),
+        })
+    }
+}
+
+/// `struct fuse_mkdir_in`, gefolgt vom Namen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MkdirIn {
+    pub mode: u32,
+}
+
+impl MkdirIn {
+    pub const SIZE: usize = 8;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() >= Self::SIZE).then(|| MkdirIn {
+            mode: u32_at(bytes, 0),
+        })
+    }
+}
+
+/// `struct fuse_mknod_in`, gefolgt vom Namen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MknodIn {
+    pub mode: u32,
+    pub rdev: u32,
+}
+
+impl MknodIn {
+    pub const SIZE: usize = 16;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() >= Self::SIZE).then(|| MknodIn {
+            mode: u32_at(bytes, 0),
+            rdev: u32_at(bytes, 4),
+        })
+    }
+}
+
+/// `struct fuse_write_in`, gefolgt von den Nutzdaten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteIn {
+    pub fh: u64,
+    pub offset: u64,
+    pub size: u32,
+}
+
+impl WriteIn {
+    pub const SIZE: usize = 40;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() >= Self::SIZE).then(|| WriteIn {
+            fh: u64_at(bytes, 0),
+            offset: u64_at(bytes, 8),
+            size: u32_at(bytes, 16),
+        })
+    }
+}
+
+/// `struct fuse_rename_in` und `struct fuse_rename2_in`, gefolgt von zwei
+/// Namen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenameIn {
+    pub newdir: u64,
+    pub flags: u32,
+    /// Wo hinter dem Kopf die beiden Namen beginnen.
+    pub names_at: usize,
+}
+
+impl RenameIn {
+    pub fn decode(bytes: &[u8], with_flags: bool) -> Option<Self> {
+        let size = if with_flags { 16 } else { 8 };
+        if bytes.len() < size {
+            return None;
+        }
+        Some(RenameIn {
+            newdir: u64_at(bytes, 0),
+            flags: if with_flags { u32_at(bytes, 8) } else { 0 },
+            names_at: size,
+        })
+    }
+}
+
+/// `struct fuse_link_in`, gefolgt vom neuen Namen.
+pub fn link_oldnodeid(bytes: &[u8]) -> Option<u64> {
+    (bytes.len() >= 8).then(|| u64_at(bytes, 0))
+}
+
+// Welche Felder eines `SETATTR` gesetzt sind.
+pub const FATTR_MODE: u32 = 1 << 0;
+pub const FATTR_UID: u32 = 1 << 1;
+pub const FATTR_GID: u32 = 1 << 2;
+pub const FATTR_SIZE: u32 = 1 << 3;
+pub const FATTR_ATIME: u32 = 1 << 4;
+pub const FATTR_MTIME: u32 = 1 << 5;
+pub const FATTR_FH: u32 = 1 << 6;
+pub const FATTR_ATIME_NOW: u32 = 1 << 7;
+pub const FATTR_MTIME_NOW: u32 = 1 << 8;
+
+/// `struct fuse_setattr_in`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetattrIn {
+    pub valid: u32,
+    pub fh: u64,
+    pub size: u64,
+    pub atime: i64,
+    pub mtime: i64,
+    pub atimensec: u32,
+    pub mtimensec: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl SetattrIn {
+    pub const SIZE: usize = 88;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(SetattrIn {
+            valid: u32_at(bytes, 0),
+            fh: u64_at(bytes, 8),
+            size: u64_at(bytes, 16),
+            atime: u64_at(bytes, 32) as i64,
+            mtime: u64_at(bytes, 40) as i64,
+            atimensec: u32_at(bytes, 56),
+            mtimensec: u32_at(bytes, 60),
+            mode: u32_at(bytes, 68),
+            uid: u32_at(bytes, 76),
+            gid: u32_at(bytes, 80),
+        })
+    }
+
+    pub fn has(&self, field: u32) -> bool {
+        self.valid & field != 0
+    }
+}
+
+/// Die beiden nullterminierten Namen hinter einem `RENAME` oder `SYMLINK`.
+pub fn two_names(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let first = bytes.iter().position(|byte| *byte == 0)?;
+    let rest = &bytes[first + 1..];
+    let second = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    Some((&bytes[..first], &rest[..second]))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
@@ -371,6 +543,20 @@ pub fn open_out(fh: u64, open_flags: u32) -> Writer {
     out
 }
 
+/// Die Antwort auf `FUSE_CREATE`: Eintrag **und** offene Datei in einem.
+pub fn create_out(nodeid: u64, attr: &Attr, valid: u64, fh: u64) -> Writer {
+    let mut out = entry_out(nodeid, attr, valid);
+    out.bytes(open_out(fh, 0).as_slice());
+    out
+}
+
+/// Schreibt `struct fuse_write_out`.
+pub fn write_out(written: u32) -> Writer {
+    let mut out = Writer::with_capacity(WRITE_OUT_SIZE);
+    out.u32(written).u32(0);
+    out
+}
+
 /// Haengt einen `struct fuse_dirent` an.
 ///
 /// Gibt `false` zurueck, wenn der Eintrag nicht mehr in den Rahmen passt —
@@ -475,6 +661,95 @@ mod tests {
             "struct fuse_kstatfs"
         );
         assert_eq!(init_out(31, 0, 0, 0).len(), INIT_OUT_LEN);
+        assert_eq!(write_out(0).len(), WRITE_OUT_SIZE, "struct fuse_write_out");
+        assert_eq!(
+            create_out(1, &attr, 0, 0).len(),
+            CREATE_OUT_SIZE,
+            "fuse_entry_out und fuse_open_out hintereinander"
+        );
+    }
+
+    #[test]
+    fn the_read_structures_have_the_sizes_from_the_header() {
+        // Ein zu klein angenommener Kopf verschoebe alles dahinter — bei
+        // `SETATTR` waere das ein Modus, der aus einer Zeitangabe stammt.
+        assert_eq!(CreateIn::SIZE, 16, "struct fuse_create_in");
+        assert_eq!(MkdirIn::SIZE, 8, "struct fuse_mkdir_in");
+        assert_eq!(MknodIn::SIZE, 16, "struct fuse_mknod_in");
+        assert_eq!(WriteIn::SIZE, 40, "struct fuse_write_in");
+        assert_eq!(SetattrIn::SIZE, 88, "struct fuse_setattr_in");
+    }
+
+    #[test]
+    fn a_setattr_is_read_back_field_by_field() {
+        let mut bytes = vec![0u8; SetattrIn::SIZE];
+        let put32 = |bytes: &mut Vec<u8>, at: usize, value: u32| {
+            bytes[at..at + 4].copy_from_slice(&value.to_ne_bytes());
+        };
+        let put64 = |bytes: &mut Vec<u8>, at: usize, value: u64| {
+            bytes[at..at + 8].copy_from_slice(&value.to_ne_bytes());
+        };
+        put32(&mut bytes, 0, FATTR_MODE | FATTR_SIZE);
+        put64(&mut bytes, 8, 9); // fh
+        put64(&mut bytes, 16, 4096); // size
+        put64(&mut bytes, 32, 111); // atime
+        put64(&mut bytes, 40, 222); // mtime
+        put32(&mut bytes, 56, 333); // atimensec
+        put32(&mut bytes, 60, 444); // mtimensec
+        put32(&mut bytes, 68, 0o644); // mode
+        put32(&mut bytes, 76, 1000); // uid
+        put32(&mut bytes, 80, 1001); // gid
+
+        let request = SetattrIn::decode(&bytes).expect("erkannt");
+        assert_eq!(request.fh, 9);
+        assert_eq!(request.size, 4096);
+        assert_eq!(request.atime, 111);
+        assert_eq!(request.mtime, 222);
+        assert_eq!(request.atimensec, 333);
+        assert_eq!(request.mtimensec, 444);
+        assert_eq!(request.mode, 0o644);
+        assert_eq!(request.uid, 1000);
+        assert_eq!(request.gid, 1001);
+        assert!(request.has(FATTR_MODE));
+        assert!(request.has(FATTR_SIZE));
+        assert!(!request.has(FATTR_UID), "was nicht gesetzt ist, gilt nicht");
+    }
+
+    #[test]
+    fn two_names_are_split_at_the_nul_byte() {
+        assert_eq!(two_names(b"alt\0neu\0"), Some((&b"alt"[..], &b"neu"[..])));
+        assert_eq!(two_names(b"alt\0neu"), Some((&b"alt"[..], &b"neu"[..])));
+    }
+
+    #[test]
+    fn a_pair_without_a_separator_is_refused() {
+        assert_eq!(two_names(b"nur-einer"), None);
+    }
+
+    #[test]
+    fn the_second_name_may_be_empty() {
+        // Kommt bei einem `SYMLINK` auf ein leeres Ziel vor. Der Aufrufer
+        // muss das ablehnen — der Parser soll es nicht verschweigen.
+        assert_eq!(two_names(b"name\0\0"), Some((&b"name"[..], &b""[..])));
+    }
+
+    #[test]
+    fn a_rename_carries_its_flags_only_in_the_second_form() {
+        let mut bytes = vec![0u8; 16];
+        bytes[0..8].copy_from_slice(&7u64.to_ne_bytes());
+        bytes[8..12].copy_from_slice(&1u32.to_ne_bytes());
+
+        let plain = RenameIn::decode(&bytes, false).expect("erkannt");
+        assert_eq!(plain.newdir, 7);
+        assert_eq!(plain.flags, 0, "RENAME kennt keine Flags");
+        assert_eq!(plain.names_at, 8);
+
+        let extended = RenameIn::decode(&bytes, true).expect("erkannt");
+        assert_eq!(extended.flags, 1);
+        assert_eq!(
+            extended.names_at, 16,
+            "die Namen stehen hinter dem laengeren Kopf"
+        );
     }
 
     #[test]

@@ -99,8 +99,9 @@ engine/   Planung von Schreibpfad und Rebuild — kein I/O            [fertig]
 broker/   btrfs-Scrub-Befund lesen, rekonstruieren, zurückschreiben [fertig]
           Lesefehler zur Laufzeit — braucht den Chunk-Baum           [offen]
 pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
-          FUSE-Schale, Lesepfad — Linux, /dev/fuse, mount(2)       [fertig]
-          Schreibpfad und Passthrough — Kernel ≥ 6.9                [offen]
+          FUSE-Schale, Lesen und Schreiben — /dev/fuse, mount(2)   [fertig]
+          Passthrough — Kernel ≥ 6.9                                [offen]
+          xattrs und Sperren — erst entscheiden, dann bauen          [offen]
 ctl/      gRPC-Daemon und CLI                                       [offen]
 ```
 

@@ -78,6 +78,13 @@ pub struct Connection {
 impl Connection {
     /// Oeffnet `/dev/fuse` und haengt den Pool ein.
     pub fn mount(mountpoint: &Path, options: &MountOptions) -> Result<Self> {
+        // Ab hier ist dieser Prozess ein Dateisystem, und ein Dateisystem hat
+        // keine eigene `umask`. Der Kernel hat die des Aufrufers auf den Modus
+        // schon angewandt, bevor er ihn schickt; wuerde sie beim `open` oder
+        // `mkdir` ein zweites Mal wirken, bekaeme jede neue Datei weniger
+        // Rechte als bestellt. libfuse macht an derselben Stelle dasselbe.
+        unsafe { libc::umask(0) };
+
         let device = open_device()?;
         let target = c_path(mountpoint)?;
 

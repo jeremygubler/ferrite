@@ -18,13 +18,25 @@
 //!
 //! # Was steht und was fehlt
 //!
-//! Der Lesepfad steht: einhaengen, nachschlagen, Attribute, Verzeichnisse
-//! vereinigt auflisten, oeffnen, lesen, Symlinks, `statfs`. Ein Pool laesst
-//! sich damit einhaengen und benutzen.
+//! Lesen und Schreiben stehen: einhaengen, nachschlagen, Attribute,
+//! Verzeichnisse vereinigt auflisten, oeffnen, lesen, schreiben, anlegen,
+//! loeschen, umbenennen, Rechte und Zeitstempel setzen, Symlinks, Hardlinks,
+//! `statfs`. Wohin ein neues Objekt gehoert, entscheidet
+//! [`place`](crate::place) — die Regeln aus `policy` gelten hier also
+//! wirklich und nicht nur auf dem Papier.
 //!
-//! Der Schreibpfad fehlt noch, und mit ihm der Passthrough. Beides ist eine
-//! eigene Aenderung — ein halb gebauter Schreibpfad in einem Dateisystem ist
-//! schlimmer als keiner.
+//! Es fehlt der Passthrough. Bis dahin geht jedes Byte durch diesen Prozess;
+//! richtig ist das Ergebnis auch so, nur langsamer.
+//!
+//! # Was ein Pool nicht kann
+//!
+//! **Erweiterte Attribute** (`getxattr` und Verwandte) beantwortet er mit
+//! `ENOSYS`. Sie tragen unter anderem POSIX-ACLs, und eine ACL, die nur auf
+//! einem von mehreren Branches eines Verzeichnisses liegt, gilt je nachdem,
+//! welcher gerade bedient. Das gehoert entschieden, bevor es gebaut wird.
+//!
+//! **Sperren** (`SETLK`, `GETLK`) ebenso: Eine Sperre ueber Platten hinweg
+//! braucht eine Stelle, die sie fuehrt.
 //!
 //! # Voraussetzungen
 //!
@@ -45,6 +57,7 @@ pub use server::PoolFs;
 use std::path::Path;
 
 use crate::error::Result;
+use crate::policy::SharePolicy;
 
 /// Haengt einen Pool ein und bedient ihn, bis er ausgehaengt wird.
 ///
@@ -55,9 +68,10 @@ use crate::error::Result;
 pub fn mount_and_serve(
     mountpoint: &Path,
     branches: Vec<BranchRoot>,
+    policy: SharePolicy,
     options: &MountOptions,
 ) -> Result<()> {
     let connection = Connection::mount(mountpoint, options)?;
-    let mut filesystem = PoolFs::new(branches);
+    let mut filesystem = PoolFs::new(branches, policy);
     filesystem.run(&connection)
 }
