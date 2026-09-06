@@ -18,6 +18,16 @@ pub enum PoolError {
     NoBranch,
     /// Alle in Frage kommenden Branches liegen unter der Reserve.
     NoSpace { needed: u64, min_free: u64 },
+    /// Fehler vom Betriebssystem.
+    ///
+    /// Kommt nur aus der FUSE-Schale. Festgehalten wird, was sich vergleichen
+    /// laesst und zur Diagnose reicht — dieselbe Form wie in `EngineError`,
+    /// denn `io::Error` selbst laesst sich nicht vergleichen.
+    Io {
+        what: &'static str,
+        kind: std::io::ErrorKind,
+        raw_os_error: Option<i32>,
+    },
 }
 
 // Ein doppelter Name steht bewusst **nicht** hier. Er ist kein Fehler der
@@ -38,6 +48,14 @@ impl fmt::Display for PoolError {
                 f,
                 "kein Branch hat {needed} Bytes frei und behaelt dabei die Reserve von {min_free}"
             ),
+            Self::Io {
+                what,
+                kind,
+                raw_os_error,
+            } => match raw_os_error {
+                Some(code) => write!(f, "{what}: {kind:?} (errno {code})"),
+                None => write!(f, "{what}: {kind:?}"),
+            },
         }
     }
 }

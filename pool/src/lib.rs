@@ -81,3 +81,7 @@ pub use merge::{
 pub use path::{ancestor_at, components, depth_of};
 pub use place::{place, Placement, PlacementRequest};
 pub use policy::{Allocation, SharePolicy, SplitDepth, SplitOverflow};
+
+/// Die FUSE-Schale. Braucht `/dev/fuse` und damit Linux.
+#[cfg(target_os = "linux")]
+pub mod fuse;

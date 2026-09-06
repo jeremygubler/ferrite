@@ -6,7 +6,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# Keine. Wie `format/` und `parity/`: Was hier steht, entscheidet — es oeffnet
-# nichts und haengt an nichts. Die FUSE-Schale kommt spaeter und bringt ihre
-# Dependencies fuer sich mit.
+# Die reinen Teile — `place`, `merge`, `path`, `policy` — kommen ohne aus, wie
+# `format/` und `parity/`. Deshalb steht hier nichts.
 [dependencies]
+# Die FUSE-Schale braucht `mount(2)`, `/dev/fuse` und `statvfs` — in `std` gibt
+# es davon nichts. Nur fuer Linux und nur fuer `fuse/`; die Entscheidungen in
+# `place`, `merge` und `path` bleiben dependency-frei und laufen ueberall.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

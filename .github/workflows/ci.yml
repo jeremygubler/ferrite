@@ -208,6 +208,46 @@ jobs:
           ls -l /dev/ublkb* /dev/ublkc* 2>/dev/null || echo "keine ublk-Geraete uebrig"
           losetup -a || true
 
+  pool:
+    # Meilenstein 5: der Pool eingehaengt, mit einem echten Kernel dahinter.
+    # Ohne diesen Job liefe die FUSE-Schale ausschliesslich auf dem Rechner des
+    # Entwicklers — und ein Dateisystem, das nur dort einhaengt, ist keins.
+    name: Pool-Namespace (FUSE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Verlangt und nicht nur gemeldet: Die Tests ueberspringen sich selbst,
+      # wenn `/dev/fuse` fehlt. Auf einem Entwicklerrechner ist das richtig, in
+      # CI waere es ein gruener Job ohne jeden Nachweis.
+      - name: /dev/fuse bereitstellen und pruefen
+        run: |
+          sudo modprobe fuse || true
+          echo "Kernel: $(uname -r)"
+          test -c /dev/fuse || { echo "/dev/fuse fehlt — der Job haette nichts geprueft"; exit 1; }
+          ls -l /dev/fuse
+
+      - name: Testbinary bauen
+        run: cargo test -p ferrite-pool --test mount --no-run
+
+      # `--test-threads=1`: Jeder Test haengt ein Dateisystem ein, und zwei
+      # gleichzeitig streiten sich um denselben Einhaengepunkt.
+      - name: Mount-Tests
+        run: sudo -E $(cargo test -p ferrite-pool --test mount --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*mount[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
+
+      # Ein abgebrochener Test kann einen Einhaengepunkt zurueckgelassen haben.
+      # Jeder Zugriff darauf haengt dann — das soll im Log stehen.
+      - name: Reste melden
+        if: always()
+        run: mount | grep -E 'fuse\.ferrite|ferrite-pool' || echo "keine Pool-Mounts uebrig"
+
   msrv:
     # `rust-version = "1.75"` steht in jeder Cargo.toml. Ohne diesen Job ist das
     # eine Behauptung: Der Test-Job baut mit `stable` und wuerde nicht merken,

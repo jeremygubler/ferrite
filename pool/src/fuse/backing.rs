@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Jeremy Gubler
+
+//! Der Zugriff auf einen einzelnen Branch — das btrfs eines Data-Members.
+//!
+//! Fast alles hier geht ueber `std`: `symlink_metadata`, `read_dir`,
+//! `read_link`, `File`. Das ist kein Geiz mit `unsafe`, sondern der Grund,
+//! warum es hier ueberhaupt keins braucht — nur `statvfs` hat in `std` keine
+//! Entsprechung.
+//!
+//! # Warum `symlink_metadata` und nicht `metadata`
+//!
+//! Ein Symlink im Pool soll ein Symlink bleiben. Wer ihm hier folgte, zeigte
+//! dem Kernel die Zieldatei und liesse ihn `readlink` nie stellen — und ein
+//! Symlink, der auf `/etc` zeigt, waere damit ein Loch aus dem Pool heraus.
+
+use std::collections::HashMap;
+use std::fs::{File, Metadata};
+use std::os::unix::fs::{DirEntryExt, MetadataExt, OpenOptionsExt};
+use std::path::PathBuf;
+
+use crate::branch::BranchId;
+use crate::error::{PoolError, Result};
+use crate::fuse::abi::Attr;
+use crate::merge::EntryKind;
+
+/// Ein Branch samt dem Verzeichnis, unter dem er im Dateisystem haengt.
+#[derive(Debug, Clone)]
+pub struct BranchRoot {
+    pub id: BranchId,
+    /// Das Wurzelverzeichnis dieses Shares auf diesem Member — also der
+    /// Einhaengepunkt des btrfs plus der Name des Shares.
+    pub root: PathBuf,
+}
+
+impl BranchRoot {
+    pub fn new(id: BranchId, root: impl Into<PathBuf>) -> Self {
+        BranchRoot {
+            id,
+            root: root.into(),
+        }
+    }
+
+    /// Der Pfad im Dateisystem zu einem Pfad im Pool.
+    ///
+    /// Der Pool-Pfad muss vorher durch [`depth_of`](crate::depth_of) gegangen
+    /// sein. Dann kann er kein `..` enthalten, und das Ergebnis liegt sicher
+    /// unterhalb der Wurzel.
+    pub fn resolve(&self, relative: &str) -> PathBuf {
+        if relative.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(relative)
+        }
+    }
+}
+
+/// Was ein Branch an einer Stelle traegt, ohne einem Symlink zu folgen.
+pub fn look(branch: &BranchRoot, relative: &str) -> Option<Metadata> {
+    std::fs::symlink_metadata(branch.resolve(relative)).ok()
+}
+
+/// Die Art eines Eintrags aus seinen Metadaten.
+pub fn kind_of(metadata: &Metadata) -> EntryKind {
+    let kind = metadata.file_type();
+    if kind.is_dir() {
+        EntryKind::Directory
+    } else if kind.is_file() {
+        EntryKind::File
+    } else if kind.is_symlink() {
+        EntryKind::Symlink
+    } else {
+        EntryKind::Other
+    }
+}
+
+/// Ein Eintrag, wie ihn ein Branch auflistet.
+#[derive(Debug, Clone)]
+pub struct RawEntry {
+    pub name: String,
+    pub kind: EntryKind,
+    /// Die Inode-Nummer des darunterliegenden Dateisystems.
+    ///
+    /// Kommt aus dem `d_ino` des Verzeichniseintrags und kostet damit keinen
+    /// eigenen Systemaufruf. Sie dient allein der Anzeige — die Identitaet
+    /// eines Objekts im Pool ist seine Nodeid, siehe [`attr_of`].
+    pub ino: u64,
+}
+
+/// Listet ein Verzeichnis eines Branches auf.
+///
+/// Ein Branch, der das Verzeichnis gar nicht hat, liefert eine leere Liste und
+/// keinen Fehler: Im Pool ist das der Normalfall, denn ein Verzeichnis muss
+/// nicht auf jeder Platte liegen.
+pub fn list(branch: &BranchRoot, relative: &str) -> Vec<RawEntry> {
+    let Ok(entries) = std::fs::read_dir(branch.resolve(relative)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let kind = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => EntryKind::Directory,
+                Ok(kind) if kind.is_file() => EntryKind::File,
+                Ok(kind) if kind.is_symlink() => EntryKind::Symlink,
+                Ok(_) => EntryKind::Other,
+                Err(_) => return None,
+            };
+            Some(RawEntry {
+                // Kein `to_string_lossy`: Ein veraenderter Name zeigte auf
+                // einen Pfad, den es nicht gibt. Siehe den Modulkopf von
+                // `server` — solche Namen bleiben unsichtbar, statt falsch
+                // zu sein.
+                name: entry.file_name().into_string().ok()?,
+                kind,
+                ino: entry.ino(),
+            })
+        })
+        .collect()
+}
+
+/// Baut die FUSE-Attribute aus den Metadaten eines Branches.
+///
+/// # Warum `ino` die Nodeid ist und nicht die Inode-Nummer der Platte
+///
+/// Zwei Members sind zwei Dateisysteme, und deren Inode-Nummern sind voneinander
+/// unabhaengig — dieselbe Zahl kommt auf jeder Platte vor. Wer sie
+/// durchreichte, zeigte im Pool zwei verschiedene Dateien mit derselben
+/// Inode-Nummer.
+///
+/// Das ist kein Schoenheitsfehler. `tar`, `rsync` und `cp -a` erkennen
+/// Hardlinks daran, dass zwei Eintraege dieselbe Inode-Nummer haben; sie
+/// speichern den zweiten dann als Verweis auf den ersten. Beim Auspacken
+/// stuende dort der Inhalt der falschen Datei — ein Datenverlust, der erst
+/// beim Wiederherstellen auffiele.
+///
+/// Die Nodeid ist dagegen ueber den ganzen Pool eindeutig und wird nie
+/// wiederverwendet.
+pub fn attr_of(metadata: &Metadata, nodeid: u64) -> Attr {
+    Attr {
+        ino: nodeid,
+        size: metadata.size(),
+        blocks: metadata.blocks(),
+        atime: metadata.atime(),
+        mtime: metadata.mtime(),
+        ctime: metadata.ctime(),
+        atimensec: metadata.atime_nsec() as u32,
+        mtimensec: metadata.mtime_nsec() as u32,
+        ctimensec: metadata.ctime_nsec() as u32,
+        mode: metadata.mode(),
+        // Hardlinks ueber Branch-Grenzen kann es nicht geben, und innerhalb
+        // eines Branches zaehlt das darunterliegende Dateisystem richtig.
+        nlink: metadata.nlink() as u32,
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        rdev: metadata.rdev() as u32,
+        blksize: metadata.blksize() as u32,
+    }
+}
+
+/// Oeffnet eine Datei auf einem Branch mit den Flags des Gastes.
+///
+/// `O_CREAT` und `O_EXCL` werden **nicht** durchgereicht: Anlegen ist eine
+/// eigene Operation, weil erst der Pool entscheidet, auf welchen Branch die
+/// neue Datei gehoert.
+pub fn open(branch: &BranchRoot, relative: &str, flags: i32) -> Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    match flags & libc::O_ACCMODE {
+        libc::O_WRONLY => options.write(true),
+        libc::O_RDWR => options.read(true).write(true),
+        _ => options.read(true),
+    };
+    let passed = flags & (libc::O_APPEND | libc::O_TRUNC | libc::O_NOATIME | libc::O_NOFOLLOW);
+    options.custom_flags(passed);
+    options
+        .open(branch.resolve(relative))
+        .map_err(io_error("Datei oeffnen"))
+}
+
+/// Der freie und der gesamte Platz eines Branches, in Bytes.
+///
+/// `statvfs` ist der einzige Aufruf hier, fuer den `std` nichts anbietet.
+pub fn space(branch: &BranchRoot) -> Result<(u64, u64)> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path =
+        CString::new(branch.root.as_os_str().as_bytes()).map_err(|_| PoolError::InvalidPath {
+            reason: "Nullbyte im Branch-Pfad",
+        })?;
+    let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut raw) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(PoolError::Io {
+            what: "freien Platz ermitteln",
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+        });
+    }
+
+    // `f_frsize` ist die Groesse eines Blocks in `f_blocks`, `f_bsize` nur die
+    // bevorzugte Blockgroesse fuer I/O. Wer die beiden verwechselt, rechnet
+    // auf manchen Dateisystemen um Groessenordnungen daneben.
+    let unit = if raw.f_frsize > 0 {
+        raw.f_frsize as u64
+    } else {
+        raw.f_bsize as u64
+    };
+    let total = (raw.f_blocks as u64).saturating_mul(unit);
+    // `f_bavail` und nicht `f_bfree`: Der fuer Root reservierte Teil steht
+    // einem Share nicht zur Verfuegung.
+    let free = (raw.f_bavail as u64).saturating_mul(unit);
+    Ok((total, free))
+}
+
+/// Die Auflistungen aller Branches, in der Form, die `merge_listing` erwartet.
+pub type Listings = Vec<(BranchId, Vec<(String, EntryKind)>)>;
+
+/// Die Zuordnung von Namen zu Inode-Nummern je Branch, fuer eine Auflistung.
+pub type InoMap = HashMap<(BranchId, String), u64>;
+
+/// Liest ein Verzeichnis auf allen Branches und trennt dabei ab, was
+/// [`merge_listing`](crate::merge_listing) braucht, von dem, was nur die
+/// Anzeige braucht.
+pub fn list_all(branches: &[BranchRoot], relative: &str) -> (Listings, InoMap) {
+    let mut listings = Vec::with_capacity(branches.len());
+    let mut inos = InoMap::new();
+
+    for branch in branches {
+        let entries = list(branch, relative);
+        let mut names = Vec::with_capacity(entries.len());
+        for entry in entries {
+            inos.insert((branch.id, entry.name.clone()), entry.ino);
+            names.push((entry.name, entry.kind));
+        }
+        listings.push((branch.id, names));
+    }
+    (listings, inos)
+}
+
+fn io_error(what: &'static str) -> impl FnOnce(std::io::Error) -> PoolError {
+    move |error| PoolError::Io {
+        what,
+        kind: error.kind(),
+        raw_os_error: error.raw_os_error(),
+    }
+}
+
+/// Der `errno`-Wert zu einem Fehler des Betriebssystems, als **negative** Zahl
+/// fuer die FUSE-Antwort.
+pub fn errno_of(error: &PoolError) -> i32 {
+    match error {
+        PoolError::Io { raw_os_error, .. } => -raw_os_error.unwrap_or(libc::EIO),
+        PoolError::InvalidPath { .. } => -libc::EINVAL,
+        PoolError::NoBranch => -libc::ENOSPC,
+        PoolError::NoSpace { .. } => -libc::ENOSPC,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn the_root_itself_resolves_to_the_root() {
+        let branch = BranchRoot::new(BranchId(0), "/mnt/data0/Filme");
+        assert_eq!(branch.resolve(""), Path::new("/mnt/data0/Filme"));
+    }
+
+    #[test]
+    fn a_relative_path_hangs_below_the_root() {
+        let branch = BranchRoot::new(BranchId(0), "/mnt/data0/Filme");
+        assert_eq!(
+            branch.resolve("2026/film.mkv"),
+            Path::new("/mnt/data0/Filme/2026/film.mkv")
+        );
+    }
+
+    #[test]
+    fn a_missing_directory_lists_as_empty_and_not_as_an_error() {
+        // Im Pool ist das der Normalfall: Ein Verzeichnis muss nicht auf
+        // jeder Platte liegen.
+        let branch = BranchRoot::new(BranchId(0), "/gibt/es/nicht");
+        assert!(list(&branch, "").is_empty());
+        assert!(look(&branch, "").is_none());
+    }
+
+    #[test]
+    fn every_error_maps_to_a_negative_errno() {
+        assert_eq!(errno_of(&PoolError::NoBranch), -libc::ENOSPC);
+        assert_eq!(
+            errno_of(&PoolError::NoSpace {
+                needed: 0,
+                min_free: 0
+            }),
+            -libc::ENOSPC
+        );
+        assert_eq!(
+            errno_of(&PoolError::InvalidPath { reason: "x" }),
+            -libc::EINVAL
+        );
+        assert_eq!(
+            errno_of(&PoolError::Io {
+                what: "x",
+                kind: std::io::ErrorKind::NotFound,
+                raw_os_error: Some(libc::ENOENT)
+            }),
+            -libc::ENOENT
+        );
+    }
+
+    #[test]
+    fn an_io_error_without_an_errno_becomes_eio() {
+        // Kommt bei Fehlern vor, die `std` selbst erzeugt. Ein `0` als errno
+        // hiesse fuer den Kernel „alles in Ordnung".
+        assert_eq!(
+            errno_of(&PoolError::Io {
+                what: "x",
+                kind: std::io::ErrorKind::Other,
+                raw_os_error: None
+            }),
+            -libc::EIO
+        );
+    }
+}
