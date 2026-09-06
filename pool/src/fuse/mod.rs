@@ -32,6 +32,12 @@
 //! langsamer, aber richtig. Der Rueckfall ist deshalb kein Fehlerpfad,
 //! sondern der zweite gewoehnliche Ausgang.
 //!
+//! Der Kernel laesst dabei **eine** hinterlegte Datei je Inode zu. Zwei
+//! Handles auf dieselbe Datei bekommen deshalb dieselbe `backing_id`, und
+//! erst wenn das letzte von ihnen geht, wird sie freigegeben. Wer jedem
+//! Handle eine eigene gibt, bekommt beim zweiten gleichzeitigen Oeffnen
+//! `EIO` — und zwar bei jedem, nicht nur bei einem seltenen.
+//!
 //! Es braucht dafuer dreierlei, und jedes einzelne scheitert still:
 //! `FUSE_PASSTHROUGH` in `flags2` der `INIT`-Antwort, `FUSE_INIT_EXT` in
 //! `flags` — ohne das sieht der Kernel `flags2` gar nicht an — und ein

@@ -61,6 +61,20 @@ type Answer = std::result::Result<Vec<u8>, i32>;
 /// `LOOKUP`s.
 const CACHE_SECONDS: u64 = 1;
 
+/// Die Datei auf der Platte: Geraet und Inode.
+///
+/// Nicht der Pfad — zwei Namen koennen auf dieselbe Datei zeigen (Hardlink),
+/// und der Kernel zaehlt Inodes, keine Namen.
+type FileKey = (u64, u64);
+
+/// Eine beim Kernel hinterlegte Datei.
+#[derive(Debug)]
+struct Handed {
+    id: i32,
+    /// Wie viele offene Handles sie halten. Bei null wird sie freigegeben.
+    holders: u32,
+}
+
 /// Ein Eintrag in der Momentaufnahme eines geoeffneten Verzeichnisses.
 #[derive(Debug, Clone)]
 struct Listed {
@@ -97,10 +111,15 @@ pub struct Counters {
     /// um die es ging, nirgends hin. Gezaehlt wird es trotzdem, sonst
     /// verschwindet es lautlos.
     pub xattrs_not_mirrored: AtomicU64,
+    /// Beim Kernel hinterlegte Dateien.
+    ///
+    /// Kleiner als [`Counters::passthrough_opens`], sobald dieselbe Datei
+    /// mehrfach offen ist — genau das ist der Sinn.
+    pub backing_opens: AtomicU64,
     /// Erfolgreich wieder freigegebene `backing_id`s.
     ///
-    /// Muss am Ende zu [`Counters::passthrough_opens`] passen. Weicht es ab,
-    /// haelt der Kernel Verweise auf Dateien, die niemand mehr braucht.
+    /// Muss am Ende zu [`Counters::backing_opens`] passen. Weicht es ab, haelt
+    /// der Kernel Verweise auf Dateien, die niemand mehr braucht.
     pub backing_closes: AtomicU64,
 }
 
@@ -111,8 +130,16 @@ pub struct PoolFs {
     policy: SharePolicy,
     inodes: InodeTable,
     files: HashMap<u64, File>,
-    /// Zu jedem Dateihandle die `backing_id`, falls eine hinterlegt wurde.
-    backing: HashMap<u64, i32>,
+    /// Zu jeder hinterlegten Datei ihre `backing_id` und ihre Halter.
+    ///
+    /// Der Schluessel ist die Datei auf der Platte, nicht das Handle: Der
+    /// Kernel laesst **eine** hinterlegte Datei je Inode zu. Zwei Handles auf
+    /// dieselbe Datei muessen deshalb dieselbe `backing_id` bekommen — wer
+    /// jedem Handle eine eigene gibt, bekommt beim zweiten gleichzeitigen
+    /// Oeffnen `EIO`.
+    backing: HashMap<FileKey, Handed>,
+    /// Zu jedem Dateihandle die hinterlegte Datei, die es haelt.
+    handed: HashMap<u64, FileKey>,
     dirs: HashMap<u64, Vec<Listed>>,
     next_fh: u64,
     /// Der zuletzt benutzte Branch, fuer [`Allocation::RoundRobin`].
@@ -147,6 +174,7 @@ impl PoolFs {
             inodes: InodeTable::new(),
             files: HashMap::new(),
             backing: HashMap::new(),
+            handed: HashMap::new(),
             dirs: HashMap::new(),
             next_fh: 1,
             cursor: None,
@@ -472,12 +500,9 @@ impl PoolFs {
         let file = backing::open(&root, &path, request.flags as i32)
             .map_err(|error| backing::errno_of(&error))?;
 
-        let (open_flags, backing_id) = self.hand_over(connection, &file);
         let fh = self.take_fh();
+        let (open_flags, backing_id) = self.hand_over(connection, &file, fh);
         self.files.insert(fh, file);
-        if backing_id != 0 {
-            self.backing.insert(fh, backing_id);
-        }
         Ok(abi::open_out(fh, open_flags, backing_id).into_bytes())
     }
 
@@ -516,11 +541,7 @@ impl PoolFs {
             // haelt der Kernel einen Verweis auf die Datei, bis der Pool
             // ausgehaengt wird — bei einem Dienst, der Monate laeuft, ist das
             // ein Leck, das erst beim Aufraeumen auffaellt.
-            if let Some(id) = self.backing.remove(&fh) {
-                if crate::fuse::connection::backing_close(connection, id) {
-                    self.counters.backing_closes.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            self.take_back(connection, fh);
         }
         Ok(Vec::new())
     }
@@ -1163,12 +1184,9 @@ impl PoolFs {
             .map_err(|error| -error.raw_os_error().unwrap_or(libc::EIO))?;
         let nodeid = self.inodes.lookup(path);
         let attr = backing::attr_of(&metadata, nodeid);
-        let (open_flags, backing_id) = self.hand_over(connection, &file);
         let fh = self.take_fh();
+        let (open_flags, backing_id) = self.hand_over(connection, &file, fh);
         self.files.insert(fh, file);
-        if backing_id != 0 {
-            self.backing.insert(fh, backing_id);
-        }
         Ok(abi::create_out(nodeid, &attr, CACHE_SECONDS, fh, open_flags, backing_id).into_bytes())
     }
 
@@ -1179,15 +1197,37 @@ impl PoolFs {
     /// viele hinterlegte Dateien —, laeuft alles wie bisher: langsamer, aber
     /// richtig. Deshalb ist der Rueckfall kein Fehlerpfad, sondern der
     /// zweite gewoehnliche Ausgang.
-    fn hand_over(&self, connection: &Connection, file: &File) -> (u32, i32) {
+    fn hand_over(&mut self, connection: &Connection, file: &File, fh: u64) -> (u32, i32) {
         use std::os::fd::AsRawFd;
 
         if !self.passthrough {
             self.counters.plain_opens.fetch_add(1, Ordering::Relaxed);
             return (0, 0);
         }
+        // Ohne Geraet und Inode liesse sich nicht sagen, ob diese Datei schon
+        // hinterlegt ist — und eine zweite `backing_id` auf denselben Inode
+        // lehnt der Kernel ab.
+        let Ok(metadata) = file.metadata() else {
+            self.counters.plain_opens.fetch_add(1, Ordering::Relaxed);
+            return (0, 0);
+        };
+        let key: FileKey = (metadata.dev(), metadata.ino());
+
+        if let Some(handed) = self.backing.get_mut(&key) {
+            handed.holders += 1;
+            let id = handed.id;
+            self.handed.insert(fh, key);
+            self.counters
+                .passthrough_opens
+                .fetch_add(1, Ordering::Relaxed);
+            return (abi::FOPEN_PASSTHROUGH, id);
+        }
+
         match crate::fuse::connection::backing_open(connection, file.as_raw_fd()) {
             Some(id) => {
+                self.backing.insert(key, Handed { id, holders: 1 });
+                self.handed.insert(fh, key);
+                self.counters.backing_opens.fetch_add(1, Ordering::Relaxed);
                 self.counters
                     .passthrough_opens
                     .fetch_add(1, Ordering::Relaxed);
@@ -1197,6 +1237,31 @@ impl PoolFs {
                 self.counters.plain_opens.fetch_add(1, Ordering::Relaxed);
                 (0, 0)
             }
+        }
+    }
+
+    /// Gibt die hinterlegte Datei frei, sobald das letzte Handle sie loslaesst.
+    ///
+    /// **Zu jedem `backing_open` gehoert ein `backing_close`.** Sonst haelt der
+    /// Kernel einen Verweis auf die Datei, bis der Pool ausgehaengt wird — bei
+    /// einem Dienst, der Monate laeuft, ist das ein Leck, das erst beim
+    /// Aufraeumen auffaellt. Zu frueh schliessen ist aber genauso falsch: Dann
+    /// laege die `backing_id` eines noch offenen Handles daneben.
+    fn take_back(&mut self, connection: &Connection, fh: u64) {
+        let Some(key) = self.handed.remove(&fh) else {
+            return;
+        };
+        let Some(handed) = self.backing.get_mut(&key) else {
+            return;
+        };
+        handed.holders -= 1;
+        if handed.holders > 0 {
+            return;
+        }
+        let id = handed.id;
+        self.backing.remove(&key);
+        if crate::fuse::connection::backing_close(connection, id) {
+            self.counters.backing_closes.fetch_add(1, Ordering::Relaxed);
         }
     }
 

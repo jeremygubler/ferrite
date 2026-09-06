@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -1210,8 +1211,13 @@ fn every_handed_over_file_is_taken_back() {
         );
     }
 
-    let opens = pool.counters.passthrough_opens.load(Ordering::Relaxed);
+    let opens = pool.counters.backing_opens.load(Ordering::Relaxed);
     assert_eq!(opens, 8, "acht Dateien, acht hinterlegte Deskriptoren");
+    assert_eq!(
+        pool.counters.passthrough_opens.load(Ordering::Relaxed),
+        8,
+        "und acht Handles, die je eine davon halten"
+    );
 
     // `RELEASE` kommt erst, wenn der Kernel die letzte Referenz fallen laesst,
     // und das ist nicht der Rueckkehrpunkt von `read_to_string`. Deshalb
@@ -1782,5 +1788,83 @@ fn without_the_negotiated_bit_the_umask_beats_the_default_acl() {
         0o600,
         "ohne das ausgehandelte Bit gewinnt die umask — das ist der Fall, den
 \n         `a_default_acl_wins_over_the_umask` ausschliesst"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn the_same_file_can_be_open_three_times_at_once() {
+    // Der Fall, an dem der Passthrough beim ersten Anlauf zerbrach: Der Kernel
+    // laesst **eine** hinterlegte Datei je Inode zu. Bekam jedes Handle eine
+    // eigene `backing_id`, schlug das zweite gleichzeitige Oeffnen mit `EIO`
+    // fehl — und zwar jedes, nicht nur ein seltenes. Zwei Leser auf derselben
+    // Datei sind der Normalfall eines NAS, nicht die Ausnahme.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("mehrfach-offen");
+    let branches = two_branches(&workspace);
+    let content: Vec<u8> = (0..(1 << 20)).map(|i| (i % 249) as u8).collect();
+    std::fs::create_dir_all(workspace.branch_root(0)).expect("Branch anlegen");
+    std::fs::write(workspace.branch_root(0).join("gross.bin"), &content).expect("schreiben");
+
+    let pool = Mounted::start(&workspace, branches);
+    let Some(()) = passthrough_or_skip(&pool) else {
+        return;
+    };
+
+    let mut open = Vec::new();
+    for round in 0..3 {
+        open.push(
+            std::fs::File::open(pool.path("gross.bin"))
+                .unwrap_or_else(|error| panic!("das {round}. gleichzeitige Oeffnen: {error}")),
+        );
+    }
+
+    // Und jedes davon liefert wirklich die Datei, nicht nur einen Deskriptor.
+    for (round, file) in open.iter().enumerate() {
+        let mut buffer = vec![0u8; content.len()];
+        file.read_exact_at(&mut buffer, 0)
+            .unwrap_or_else(|error| panic!("Lesen aus Handle {round}: {error}"));
+        assert_eq!(buffer, content, "Handle {round}");
+    }
+
+    assert_eq!(
+        pool.counters.passthrough_opens.load(Ordering::Relaxed),
+        3,
+        "drei Handles"
+    );
+    assert_eq!(
+        pool.counters.backing_opens.load(Ordering::Relaxed),
+        1,
+        "aber nur eine hinterlegte Datei — mehr nimmt der Kernel je Inode nicht"
+    );
+    assert_eq!(
+        pool.counters.reads.load(Ordering::Relaxed),
+        0,
+        "auch das zweite und dritte Handle bedient der Kernel selbst"
+    );
+
+    // Erst wenn das letzte Handle geht, darf die Datei freigegeben werden.
+    let last = open.pop().expect("drei Handles");
+    drop(open);
+    // Kurz warten, damit ein verfruehtes `RELEASE` eine Chance haette,
+    // aufzufallen — aber nicht auf eines warten, das nicht kommen soll.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        pool.counters.backing_closes.load(Ordering::Relaxed),
+        0,
+        "solange ein Handle offen ist, darf die backing_id nicht weg sein"
+    );
+
+    drop(last);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pool.counters.backing_closes.load(Ordering::Relaxed) < 1
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        pool.counters.backing_closes.load(Ordering::Relaxed),
+        1,
+        "nach dem letzten Handle muss sie freigegeben werden"
     );
 }

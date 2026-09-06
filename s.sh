@@ -10,27 +10,21 @@ run() {
 }
 echo "=== 0. unversehrt ==="; run
 
-echo "=== 1. FUSE_DONT_MASK nicht angemeldet ==="
+echo "=== 1. jedes Handle bekommt eine eigene backing_id (der alte Fehler) ==="
 cp pool/src/fuse/server.rs /tmp/server.bak
-perl -0pi -e 's{flags \|= request\.flags & \(abi::FUSE_POSIX_ACL \| abi::FUSE_DONT_MASK\);}{flags |= request.flags \& abi::FUSE_POSIX_ACL;}; s{flags & abi::FUSE_POSIX_ACL != 0 && flags & abi::FUSE_DONT_MASK != 0;}{flags \& abi::FUSE_POSIX_ACL != 0;}' pool/src/fuse/server.rs
+perl -0pi -e 's{        if let Some\(handed\) = self\.backing\.get_mut\(&key\) \{}{        if let Some(handed) = None::<&mut Handed> \{}' pool/src/fuse/server.rs
 run
 cp /tmp/server.bak pool/src/fuse/server.rs
 
-echo "=== 2. creation_mode zieht nie ab ==="
+echo "=== 2. beim ersten release schon schliessen ==="
 cp pool/src/fuse/server.rs /tmp/server.bak
-perl -0pi -e 's{        if backing::has_default_acl\(root, &parent\) \{\n            mode\n        \} else \{\n            mode & !umask\n        \}}{        let _ = (root, parent, umask);\n        mode}' pool/src/fuse/server.rs
+perl -0pi -e 's{        handed\.holders -= 1;\n        if handed\.holders > 0 \{\n            return;\n        \}}{        handed.holders -= 1;}' pool/src/fuse/server.rs
 run
 cp /tmp/server.bak pool/src/fuse/server.rs
 
-echo "=== 3. creation_mode zieht immer ab ==="
+echo "=== 3. nie schliessen ==="
 cp pool/src/fuse/server.rs /tmp/server.bak
-perl -0pi -e 's{        if backing::has_default_acl\(root, &parent\) \{\n            mode\n        \} else \{\n            mode & !umask\n        \}}{        let _ = (root, parent);\n        mode & !umask}' pool/src/fuse/server.rs
-run
-cp /tmp/server.bak pool/src/fuse/server.rs
-
-echo "=== 4. Attribute werden beim Spiegeln nicht mitgenommen ==="
-cp pool/src/fuse/server.rs /tmp/server.bak
-perl -0pi -e 's{            let \(_, failed\) = backing::copy_xattrs\(&from, &root, ancestor\);}{            let (_, failed) = (0, 0);}' pool/src/fuse/server.rs
+perl -0pi -e 's{        if crate::fuse::connection::backing_close\(connection, id\) \{}{        if false \&\& crate::fuse::connection::backing_close(connection, id) \{}' pool/src/fuse/server.rs
 run
 cp /tmp/server.bak pool/src/fuse/server.rs
 
