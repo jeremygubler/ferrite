@@ -17,6 +17,7 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use ferrite_pool::fuse::{BranchRoot, Connection, Counters, MountOptions, PoolFs};
@@ -1866,5 +1867,206 @@ fn the_same_file_can_be_open_three_times_at_once() {
         pool.counters.backing_closes.load(Ordering::Relaxed),
         1,
         "nach dem letzten Handle muss sie freigegeben werden"
+    );
+}
+
+// --- Sperren --------------------------------------------------------------
+//
+// Die Entscheidung, die diese Tests festhalten: Der Pool meldet weder
+// `FUSE_POSIX_LOCKS` noch `FUSE_FLOCK_LOCKS` an. Dann fuehrt der Kernel
+// `fcntl`- und `flock`-Sperren selbst, auf dem Inode des Pools — und damit
+// fuer jeden Prozess auf dieser Maschine richtig. Genau das ist der Fall, der
+// zaehlt: Samba, der NFS-Server und die VMs laufen hier.
+//
+// Sie selbst zu fuehren waere teurer und schlechter. Ein blockierendes
+// `SETLKW` muesste die Schleife dieses Servers offenhalten, dazu kaemen
+// Abbruch ueber `INTERRUPT` und eine eigene Buchfuehrung nach Besitzer — und
+// am Ende stuende dieselbe Semantik, die der Kernel schon hat.
+//
+// Was dabei **nicht** geht, steht als eigener Test darunter: Eine Sperre ueber
+// den Pool haelt niemanden auf, der die Platte unter dem Pool direkt oeffnet.
+// Das ist keiner Union-Schicht anders moeglich und gehoert deshalb aufgeschrieben.
+
+/// Was ein Kindprozess mit der Datei versuchen soll.
+#[derive(Debug, Clone, Copy)]
+enum Attempt {
+    /// `flock(LOCK_EX | LOCK_NB)`.
+    Flock,
+    /// `fcntl(F_SETLK, F_WRLCK)` ueber einen Bereich.
+    Range(u64, u64),
+}
+
+/// Versucht die Sperre in einem **eigenen Prozess** und sagt, ob er sie bekam.
+///
+/// Ein eigener Prozess ist Pflicht und keine Umstaendlichkeit: `flock` haengt
+/// an der offenen Dateibeschreibung, `fcntl` am Prozess. Beides kollidiert
+/// innerhalb desselben Prozesses nicht — ein Test, der die zweite Sperre im
+/// Testprozess naehme, bekaeme sie immer und pruefte nichts.
+///
+/// Zwischen `fork` und `_exit` steht nur, was dort stehen darf: `open`,
+/// `flock`/`fcntl`, `_exit`. Alles, was allokiert, ist vorher passiert.
+fn lock_taken_by_another_process(path: &Path, attempt: Attempt) -> bool {
+    let path = c_str(path);
+
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork: {}", std::io::Error::last_os_error());
+    if child == 0 {
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
+        if fd < 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            unsafe { libc::_exit((100 + errno.min(50)) as libc::c_int) };
+        }
+        let got = match attempt {
+            Attempt::Flock => (unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) }) == 0,
+            Attempt::Range(start, len) => {
+                let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+                lock.l_type = libc::F_WRLCK as libc::c_short;
+                lock.l_whence = libc::SEEK_SET as libc::c_short;
+                lock.l_start = start as libc::off_t;
+                lock.l_len = len as libc::off_t;
+                unsafe { libc::fcntl(fd, libc::F_SETLK, &lock) == 0 }
+            }
+        };
+        unsafe { libc::_exit(if got { 0 } else { 1 }) };
+    }
+
+    let mut status = 0;
+    let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+    assert_eq!(waited, child, "waitpid");
+    let code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        -1
+    };
+    assert!(
+        code < 100,
+        "das Kind konnte die Datei nicht oeffnen: errno {}",
+        code - 100
+    );
+    assert!(code == 0 || code == 1, "unerwarteter Ausgang: {code}");
+    code == 0
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn a_flock_through_the_pool_keeps_the_next_process_out() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("flock");
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pool.path("nur-null.txt"))
+        .expect("oeffnen");
+    // Vorher: Ohne gehaltene Sperre muss das Kind sie bekommen. Sonst
+    // bewiese der Test darunter nur, dass irgendetwas fehlschlaegt.
+    assert!(
+        lock_taken_by_another_process(&pool.path("nur-null.txt"), Attempt::Flock),
+        "ohne gehaltene Sperre muss die Falle offen sein"
+    );
+
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "die eigene Sperre: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        !lock_taken_by_another_process(&pool.path("nur-null.txt"), Attempt::Flock),
+        "ein zweiter Prozess hat die Sperre trotzdem bekommen"
+    );
+
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) }, 0);
+    assert!(
+        lock_taken_by_another_process(&pool.path("nur-null.txt"), Attempt::Flock),
+        "nach dem Loslassen muss sie wieder zu haben sein"
+    );
+
+    assert_eq!(
+        pool.counters.lock_requests.load(Ordering::Relaxed),
+        0,
+        "die Sperren fuehrt der Kernel, nicht dieser Server"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn two_fcntl_ranges_in_the_same_file_do_not_collide() {
+    // Bereichssperren sind das, was Datenbanken und Samba benutzen. Ein
+    // Pool, der sie zu grob fuehrte, machte aus einer Datei einen
+    // Flaschenhals — und einer, der sie zu fein fuehrte, liesse zwei
+    // Schreiber auf dieselben Bytes.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("fcntl");
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+
+    let datei = pool.path("gross.bin");
+    std::fs::write(&datei, vec![0u8; 4096]).expect("schreiben");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&datei)
+        .expect("oeffnen");
+
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as libc::c_short;
+    lock.l_whence = libc::SEEK_SET as libc::c_short;
+    lock.l_start = 0;
+    lock.l_len = 100;
+    assert_eq!(
+        unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETLK, &lock) },
+        0,
+        "die eigene Bereichssperre: {}",
+        std::io::Error::last_os_error()
+    );
+
+    assert!(
+        !lock_taken_by_another_process(&datei, Attempt::Range(50, 100)),
+        "der ueberlappende Bereich haette gesperrt sein muessen"
+    );
+    assert!(
+        lock_taken_by_another_process(&datei, Attempt::Range(100, 100)),
+        "der Bereich dahinter ist frei und muss zu haben sein"
+    );
+
+    assert_eq!(
+        pool.counters.lock_requests.load(Ordering::Relaxed),
+        0,
+        "die Sperren fuehrt der Kernel, nicht dieser Server"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn a_lock_through_the_pool_does_not_reach_the_disk_underneath() {
+    // Die Grenze, schwarz auf weiss. Eine Sperre gilt fuer den Inode des
+    // Pools; wer die Platte darunter direkt oeffnet, sieht sie nicht. Keine
+    // vereinigende Schicht kann das anders — nur muss es dastehen, damit es
+    // niemand fuer einen Fehler haelt, wenn es ihm auffaellt.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("sperre-grenze");
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pool.path("nur-null.txt"))
+        .expect("oeffnen");
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+
+    assert!(
+        lock_taken_by_another_process(
+            &workspace.branch_root(0).join("nur-null.txt"),
+            Attempt::Flock
+        ),
+        "unerwartet: die Sperre reicht bis auf die Platte — dann stimmt die \
+         Beschreibung im Modulkopf nicht mehr"
     );
 }

@@ -169,10 +169,30 @@ Entwickler nie findet.
    vergleicht sie byteweise und besteht nur, wenn der Server dabei **null**
    READ-Anfragen gezählt hat. Auf einem älteren Kernel fällt alles auf den
    gewöhnlichen Weg zurück — langsamer, aber richtig —, und der Test sagt,
-   dass er übersprungen hat, statt still grün zu sein. Offen bleiben
-   erweiterte Attribute und Sperren. Eine ACL, die nur auf einer von mehreren
-   Platten eines Verzeichnisses liegt, gilt je nachdem, welche gerade bedient —
-   das gehört entschieden, bevor es gebaut wird.
+      dass er übersprungen hat, statt still grün zu sein.
+   **Erweiterte Attribute und ACLs** waren keine Fleißarbeit, sondern eine
+   Entscheidung: Eine ACL, die nur auf einer von mehreren Platten eines
+   Verzeichnisses liegt, gälte je nachdem, welche gerade bedient. Deshalb
+   gilt dieselbe Regel wie bei `chmod` — gelesen wird von der bedienenden
+   Platte, geschrieben auf jede, die den Namen trägt —, und wächst ein
+   Verzeichnis auf eine zweite Platte, kommen seine Attribute mit. Ohne das
+   bekäme eine Datei je nach Platte andere Rechte.
+   Dabei kam ein Fall zutage, den man leicht übersieht: Ohne
+   `FUSE_POSIX_ACL` **speichert** der Kernel ACLs, ohne sie durchzusetzen.
+   `setfacl` gelingt, das Attribut liegt auf der Platte, und es gilt trotzdem
+   nicht. Angemeldet werden deshalb `FUSE_POSIX_ACL` und `FUSE_DONT_MASK`
+   zusammen — ohne das zweite zieht der Kernel die umask weiter selbst ab, und
+   eine Datei in einem Verzeichnis, das der Gruppe Schreibrecht vererben soll,
+   entsteht als `0600`. Beide Wege stehen als Test, samt Gegenprobe.
+   **Sperren** führt der Pool bewusst nicht selbst. Weil er weder
+   `FUSE_POSIX_LOCKS` noch `FUSE_FLOCK_LOCKS` anmeldet, führt der Kernel
+   `fcntl` und `flock` auf dem Inode des Pools — richtig für jeden Prozess auf
+   dieser Maschine, und das sind Samba, der NFS-Server und die VMs. Ein
+   blockierendes `SETLKW` selbst zu führen hieße, die Schleife des Servers
+   offenzuhalten, dazu Abbruch über `INTERRUPT` und eine eigene Buchführung —
+   am Ende stünde dieselbe Semantik, die der Kernel schon hat. Drei Tests
+   halten es fest, einer davon die Grenze: Eine Sperre über den Pool hält
+   niemanden auf, der die Platte darunter direkt öffnet.
 6. **Control plane und UI.** Angefangen, und zwar am unteren Ende: Es gibt ein
    Kommando. `ferrite create` legt ein Array an, `ferrite status` sagt, wie es
    ihm geht. Das ist wenig, aber es ist die Schwelle zwischen einer Bibliothek
@@ -248,7 +268,7 @@ von Anfang an mitläuft.
 | `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion (ein **und zwei** ausgefallene Slots), Rebuild, Recovery und Reparatur mit Gegenprobe — 160 Tests grün (150 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
-| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 28 Tests an einem echt eingehängten Pool, in CI, davon 4 für den Passthrough — inklusive der Gegenprobe, dass ohne ihn sehr wohl Anfragen ankommen. xattrs und Sperren offen |
+| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`: 41 Tests an einem echt eingehängten Pool, in CI — 5 für den Passthrough, 5 für erweiterte Attribute, 5 für POSIX-ACLs und 3 für Sperren, jeweils samt Gegenprobe mit abgeschalteter Aushandlung |
 | `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. systemd-Units in `packaging/`. Daemon und Web-UI offen |
 
 ```

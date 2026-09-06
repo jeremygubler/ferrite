@@ -81,8 +81,21 @@
 //!
 //! # Was ein Pool nicht kann
 //!
-//! **Sperren** (`SETLK`, `GETLK`) beantwortet dieser Server nicht — und das
-//! ist Absicht, siehe [`server`].
+//! **Sperren** fuehrt dieser Server nicht selbst — und das ist die
+//! Entscheidung, nicht die Luecke. Weil weder `FUSE_POSIX_LOCKS` noch
+//! `FUSE_FLOCK_LOCKS` angemeldet sind, fuehrt der Kernel `fcntl`- und
+//! `flock`-Sperren auf dem Inode des Pools. Damit gelten sie fuer jeden
+//! Prozess auf dieser Maschine, und genau das ist der Fall, der zaehlt:
+//! Samba, der NFS-Server und die VMs laufen hier.
+//!
+//! Sie selbst zu fuehren waere teurer und schlechter. Ein blockierendes
+//! `SETLKW` muesste die Schleife dieses Servers offenhalten, dazu kaemen
+//! Abbruch ueber `INTERRUPT` und eine Buchfuehrung nach Besitzer — und am
+//! Ende stuende dieselbe Semantik, die der Kernel schon hat.
+//!
+//! Die Grenze: Eine Sperre ueber den Pool haelt niemanden auf, der die Platte
+//! darunter direkt oeffnet. Das kann keine vereinigende Schicht anders, und
+//! es steht als eigener Test da, damit es niemand fuer einen Fehler haelt.
 //!
 //! # Voraussetzungen
 //!

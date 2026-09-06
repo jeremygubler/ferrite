@@ -1,8 +1,0 @@
-cd /mnt/c/Users/jeremy.DOMAIN/Desktop/ferrite
-export CARGO_TARGET_DIR=/tmp/ferrite-target
-export RUSTUP_HOME=/home/jeremy/.rustup
-export CARGO_HOME=/home/jeremy/.cargo
-export PATH="/home/jeremy/.cargo/bin:$PATH"
-command -v setfacl >/dev/null || { echo "setfacl fehlt -> installiere"; apt-get install -y -q acl >/dev/null 2>&1; }
-BIN=$(cargo test -p ferrite-pool --test mount --no-run --message-format=json 2>&1 | grep -o '"executable":"[^"]*mount[^"]*"' | tail -1 | cut -d'"' -f4)
-"$BIN" --ignored --nocapture --test-threads=1 2>&1 | grep -vE "^test [a-z_]+ \.\.\. ok$" | tail -50

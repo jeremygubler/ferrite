@@ -104,6 +104,12 @@ pub struct Counters {
     pub reads: AtomicU64,
     /// `WRITE`-Anfragen, die dieser Prozess bedient hat.
     pub writes: AtomicU64,
+    /// Sperranfragen, die hier angekommen sind.
+    ///
+    /// Muss null bleiben. Der Kernel fuehrt die Sperren selbst, weil dieser
+    /// Server sie nicht anmeldet — steigt der Zaehler, hat sich das geaendert,
+    /// ohne dass es jemand entschieden haette.
+    pub lock_requests: AtomicU64,
     /// Attribute, die beim Spiegeln eines Verzeichnisses nicht mitkamen.
     ///
     /// Nicht jedes Dateisystem nimmt jedes Attribut an. Das Verzeichnis
@@ -294,6 +300,24 @@ impl PoolFs {
             abi::FUSE_LISTXATTR => Some(self.listxattr(header.nodeid, data)),
             abi::FUSE_SETXATTR => Some(self.setxattr(header.nodeid, data)),
             abi::FUSE_REMOVEXATTR => Some(self.removexattr(header.nodeid, data)),
+
+            // --- Sperren ---
+            //
+            // Bewusst nicht beantwortet. Weil dieser Server weder
+            // `FUSE_POSIX_LOCKS` noch `FUSE_FLOCK_LOCKS` anmeldet, fuehrt der
+            // Kernel `fcntl`- und `flock`-Sperren selbst — auf dem Inode des
+            // Pools, und damit fuer jeden Prozess auf dieser Maschine
+            // richtig. Das ist genau der Fall, der zaehlt: Samba, der
+            // NFS-Server und die VMs laufen hier.
+            //
+            // Sollte ein Kernel sie doch schicken, ist `ENOSYS` die richtige
+            // Antwort — er merkt sich das und faellt auf dieselbe lokale
+            // Behandlung zurueck. Gezaehlt wird es trotzdem: Kaeme hier je
+            // eine Anfrage an, waere die Zusage oben gebrochen.
+            abi::FUSE_GETLK | abi::FUSE_SETLK | abi::FUSE_SETLKW => {
+                self.counters.lock_requests.fetch_add(1, Ordering::Relaxed);
+                Some(Err(-libc::ENOSYS))
+            }
 
             // Alles andere kann dieser Server noch nicht. `ENOSYS` und nicht
             // `EIO`: Der Kernel merkt sich, dass es diese Operation nicht
