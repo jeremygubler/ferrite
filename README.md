@@ -167,7 +167,18 @@ Entwickler nie findet.
    erweiterte Attribute und Sperren. Eine ACL, die nur auf einer von mehreren
    Platten eines Verzeichnisses liegt, gilt je nachdem, welche gerade bedient —
    das gehört entschieden, bevor es gebaut wird.
-6. **Control plane und UI.**
+6. **Control plane und UI.** Angefangen, und zwar am unteren Ende: Es gibt ein
+   Kommando. `ferrite create` legt ein Array an, `ferrite status` sagt, wie es
+   ihm geht. Das ist wenig, aber es ist die Schwelle zwischen einer Bibliothek
+   und etwas, das jemand anderes ausprobieren kann — vorher musste man Rust
+   schreiben, um eine Platte zu initialisieren.
+   `create` ist **standardmäßig ein Trockenlauf**: Es zeigt, welche Platten es
+   überschreiben würde, und tut es erst mit `--yes`. Ein Gerät, auf dem schon
+   ein Ferrite-Superblock liegt, wird abgelehnt. `status` gibt seinen Befund
+   auch als Rückgabewert zurück — 0 heil, 1 degradiert, 2 nicht
+   zusammensetzbar —, denn ein Monitoring liest keinen Text.
+   Offen bleibt der laufende Betrieb: ein Prozess, der die ublk-Geräte
+   bereitstellt und den Pool einhängt. Und danach der Daemon samt Web-UI.
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
 
@@ -188,10 +199,30 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
-| `ctl/` | offen |
+| `ctl/` | Das Werkzeug `ferrite`: Array anlegen und Zustand ansehen — 56 Tests grün, davon 13 gegen das echte Binary. Laufender Betrieb und Web-UI offen |
 
 ```
 cargo test
+```
+
+## Ausprobieren
+
+Ohne Festplatten, ohne Root: Ferrite unterscheidet nicht zwischen einem
+Blockgerät und einer Datei, die eines nachbildet.
+
+```bash
+for n in a b p q log; do truncate -s 256M /tmp/$n.img; done
+cargo run -p ferrite-ctl -- create \
+    --data /tmp/a.img --data /tmp/b.img \
+    --parity-p /tmp/p.img --parity-q /tmp/q.img \
+    --log /tmp/log.img
+```
+
+Das schreibt noch **nichts** — es zeigt nur, welche Geräte es anfassen würde.
+Erst dasselbe Kommando mit `--yes` legt an. Danach:
+
+```bash
+cargo run -p ferrite-ctl -- status /tmp/*.img
 ```
 
 Die Fuzz-Targets liegen in `format/fuzz/` und brauchen eine Nightly-Toolchain

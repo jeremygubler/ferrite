@@ -1,0 +1,19 @@
+[package]
+name = "ferrite-ctl"
+description = "Das Werkzeug: ein Ferrite-Array anlegen und seinen Zustand ansehen."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ferrite"
+path = "src/main.rs"
+
+# Keine fremden Crates. Das Zerlegen einer Kommandozeile ist ein paar hundert
+# Zeilen, seine Fehler zeigen sich beim ersten Aufruf, und die Meldungen
+# gehoeren bei einem Werkzeug, das Platten beschreibt, in dieselbe Hand wie
+# der Rest.
+[dependencies]
+ferrite-engine = { path = "../engine" }
+ferrite-format = { path = "../format" }

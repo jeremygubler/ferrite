@@ -17,6 +17,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-ctl"
+version = "0.1.0"
+dependencies = [
+ "ferrite-engine",
+ "ferrite-format",
+]
+
+[[package]]
 name = "ferrite-engine"
 version = "0.1.0"
 dependencies = [

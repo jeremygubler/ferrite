@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["format", "parity", "engine", "integration", "harness", "broker", "pool"]
+members = ["format", "parity", "engine", "integration", "harness", "broker", "pool", "ctl"]
 
 [workspace.package]
 version = "0.1.0"
