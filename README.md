@@ -201,7 +201,17 @@ Entwickler nie findet.
    Rekonstruktion aufzugeben.
    Der ganze Ablauf läuft in CI durch, **ohne Root und ohne Kernel** — keiner
    dieser Schritte braucht ein Blockgerät.
-   Offen bleibt der Daemon samt Web-UI.
+   Und Ferrite **läuft als Dienst**: `ferrite run` ohne ein einziges Argument.
+   Welche Platte welche Rolle trägt, steht in ihrem Superblock; die
+   Konfiguration sagt nur, wo gesucht wird. Eine Geräteliste in einer Datei
+   wäre ein zweiter Ort für denselben Zustand — und der weicht ab, sobald
+   jemand eine Platte umsteckt. Unter `/dev/disk/by-id` steht dieselbe Platte
+   mehrfach (`ata-…`, `wwn-…`); entdoppelt wird über die Member-UUID.
+   `packaging/systemd/` bringt die Unit und einen monatlichen Scrub-Timer mit
+   — **ohne** `--repair`: Ein Zeitplan, der von selbst Parität neu bildet,
+   überschriebe eine veraltete auch dann, wenn die Ursache noch da ist.
+   Offen bleiben das Betriebstagebuch, die Benachrichtigung und danach der
+   Daemon samt Web-UI.
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
 
@@ -222,7 +232,7 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
-| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild — 74 Tests grün, davon 26 gegen das echte Binary ohne Root (darunter der ganze Reparaturablauf). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Daemon und Web-UI offen |
+| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test — 109 Tests grün, davon 32 gegen das echte Binary ohne Root (Reparaturablauf und Konfiguration). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. systemd-Units in `packaging/`. Tagebuch, Meldung, Daemon und Web-UI offen |
 
 ```
 cargo test
@@ -252,6 +262,22 @@ Und in Betrieb nehmen — **das** braucht Linux mit `ublk_drv` und Root:
 
 ```bash
 sudo ferrite run /tmp/a.img /tmp/b.img /tmp/p.img /tmp/q.img /tmp/log.img
+```
+
+Im Betrieb gibt man die Platten nicht an. `packaging/ferrite.conf.example`
+nach `/etc/ferrite/ferrite.conf` legen, die Unit aus `packaging/systemd/`
+installieren, und `ferrite run` findet die Members selbst — über ihre
+Superblöcke. Was angeschlossen ist, zeigt:
+
+```bash
+sudo ferrite discover
+```
+
+Ob ein Gerät seinen `FLUSH` ehrlich beantwortet — und damit, ob Write-Back
+je erlaubt sein wird — beantwortet nur echte Hardware:
+
+```bash
+sudo ferrite check-flush /dev/disk/by-id/…
 ```
 
 Je Data-Slot erscheint ein `/dev/ublkbN`. Was darauf kommt, entscheidest du:

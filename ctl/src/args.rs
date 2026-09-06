@@ -44,13 +44,24 @@ pub enum Command {
     Replace(Box<ReplacePlan>),
     /// Einen als unbrauchbar gemeldeten Member wiederherstellen.
     Rebuild(RebuildRequest),
+    /// Fragen, ob das `FLUSH` eines Geraets ehrlich ist.
+    CheckFlush(StatusRequest),
+    /// Zeigen, welche Ferrite-Arrays angeschlossen sind.
+    Discover(DiscoverRequest),
     Help,
     Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverRequest {
+    /// Wo gesucht wird. Leer heisst: was in der Konfiguration steht.
+    pub scan: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrubRequest {
     pub devices: Vec<PathBuf>,
+    pub config: Option<PathBuf>,
     /// Eine nicht passende Paritaet neu bilden, statt sie nur zu melden.
     pub repair: bool,
 }
@@ -69,6 +80,7 @@ pub struct ReplacePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebuildRequest {
     pub devices: Vec<PathBuf>,
+    pub config: Option<PathBuf>,
     pub slot_index: u16,
     /// Wieviele Bloecke je Durchgang.
     ///
@@ -84,14 +96,18 @@ pub const DEFAULT_BATCH: u64 = 64;
 /// Was `run` in Betrieb nehmen soll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPlan {
+    /// Leer heisst: aus der Konfiguration suchen. Das ist der Fall, in dem
+    /// eine systemd-Unit `ferrite run` ohne ein einziges Argument startet.
     pub devices: Vec<PathBuf>,
+    /// Woher die Konfiguration kommt. `None` heisst: der uebliche Ort.
+    pub config: Option<PathBuf>,
     /// Wo der vereinigte Pool eingehaengt wird. `None` heisst: nur die
     /// Blockgeraete bereitstellen, den Rest macht der Betreiber selbst.
     pub pool: Option<PathBuf>,
     /// Unter welchem Verzeichnis die einzelnen Members eingehaengt werden.
-    pub state_dir: PathBuf,
+    pub state_dir: Option<PathBuf>,
     /// Welches Dateisystem auf den Members liegt.
-    pub fstype: String,
+    pub fstype: Option<String>,
 }
 
 /// Wo die Members eingehaengt werden, wenn nichts anderes gesagt wird.
@@ -131,6 +147,8 @@ impl CreatePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusRequest {
     pub devices: Vec<PathBuf>,
+    /// Woher die Konfiguration kommt, wenn die Liste leer ist.
+    pub config: Option<PathBuf>,
 }
 
 /// Warum eine Kommandozeile nicht benutzbar ist.
@@ -200,6 +218,19 @@ pub fn parse(arguments: &[String]) -> Result<Command, ArgError> {
         "scrub" => parse_scrub(rest),
         "replace" => parse_replace(rest).map(|plan| Command::Replace(Box::new(plan))),
         "rebuild" => parse_rebuild(rest),
+        "check-flush" => {
+            let devices: Vec<PathBuf> = rest.iter().map(PathBuf::from).collect();
+            if devices.is_empty() {
+                return Err(ArgError::NoDevices);
+            }
+            Ok(Command::CheckFlush(StatusRequest {
+                devices,
+                config: None,
+            }))
+        }
+        "discover" => Ok(Command::Discover(DiscoverRequest {
+            scan: rest.iter().map(PathBuf::from).collect(),
+        })),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
         other => Err(ArgError::UnknownCommand(other.to_string())),
@@ -292,9 +323,10 @@ fn parse_create(arguments: &[String]) -> Result<CreatePlan, ArgError> {
 /// danach zu fragen waere eine zweite Wahrheit neben der auf der Platte.
 fn parse_run(arguments: &[String]) -> Result<RunPlan, ArgError> {
     let mut devices: Vec<PathBuf> = Vec::new();
+    let mut config: Option<PathBuf> = None;
     let mut pool: Option<PathBuf> = None;
-    let mut state_dir = PathBuf::from(DEFAULT_STATE_DIR);
-    let mut fstype = "btrfs".to_string();
+    let mut state_dir: Option<PathBuf> = None;
+    let mut fstype: Option<String> = None;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -309,9 +341,10 @@ fn parse_run(arguments: &[String]) -> Result<RunPlan, ArgError> {
             .get(index + 1)
             .ok_or_else(|| ArgError::MissingValue(argument.to_string()))?;
         match argument {
+            "--config" => config = Some(PathBuf::from(value)),
             "--pool" => pool = Some(PathBuf::from(value)),
-            "--state-dir" => state_dir = PathBuf::from(value),
-            "--fstype" => fstype.clone_from(value),
+            "--state-dir" => state_dir = Some(PathBuf::from(value)),
+            "--fstype" => fstype = Some(value.clone()),
             other => {
                 return Err(ArgError::UnknownOption {
                     command: "run",
@@ -322,12 +355,12 @@ fn parse_run(arguments: &[String]) -> Result<RunPlan, ArgError> {
         index += 2;
     }
 
-    if devices.is_empty() {
-        return Err(ArgError::NoDevices);
-    }
+    // Keine Geraete ist **kein** Fehler: Dann kommen sie aus der
+    // Konfiguration, und genau so startet die systemd-Unit.
     check_distinct(&devices)?;
     Ok(RunPlan {
         devices,
+        config,
         pool,
         state_dir,
         fstype,
@@ -336,26 +369,44 @@ fn parse_run(arguments: &[String]) -> Result<RunPlan, ArgError> {
 
 fn parse_scrub(arguments: &[String]) -> Result<Command, ArgError> {
     let mut devices: Vec<PathBuf> = Vec::new();
+    let mut config: Option<PathBuf> = None;
     let mut repair = false;
 
-    for argument in arguments {
-        match argument.as_str() {
-            "--repair" => repair = true,
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        match argument {
+            "--repair" => {
+                repair = true;
+                index += 1;
+            }
+            "--config" => {
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or_else(|| ArgError::MissingValue(argument.to_string()))?;
+                config = Some(PathBuf::from(value));
+                index += 2;
+            }
             other if other.starts_with("--") => {
                 return Err(ArgError::UnknownOption {
                     command: "scrub",
                     option: other.to_string(),
                 })
             }
-            path => devices.push(PathBuf::from(path)),
+            path => {
+                devices.push(PathBuf::from(path));
+                index += 1;
+            }
         }
     }
 
-    if devices.is_empty() {
-        return Err(ArgError::NoDevices);
-    }
+    // Leer heisst suchen — der Timer ruft `ferrite scrub` ohne Argumente.
     check_distinct(&devices)?;
-    Ok(Command::Scrub(ScrubRequest { devices, repair }))
+    Ok(Command::Scrub(ScrubRequest {
+        devices,
+        config,
+        repair,
+    }))
 }
 
 fn parse_replace(arguments: &[String]) -> Result<ReplacePlan, ArgError> {
@@ -432,6 +483,7 @@ fn parse_replace(arguments: &[String]) -> Result<ReplacePlan, ArgError> {
 
 fn parse_rebuild(arguments: &[String]) -> Result<Command, ArgError> {
     let mut devices: Vec<PathBuf> = Vec::new();
+    let mut config: Option<PathBuf> = None;
     let mut slot_index: Option<u16> = None;
     let mut batch = DEFAULT_BATCH;
 
@@ -449,6 +501,7 @@ fn parse_rebuild(arguments: &[String]) -> Result<Command, ArgError> {
             .ok_or_else(|| ArgError::MissingValue(argument.to_string()))?;
         match argument {
             "--slot" => slot_index = Some(parse_slot(value)?),
+            "--config" => config = Some(PathBuf::from(value)),
             "--batch" => {
                 batch = value
                     .parse::<u64>()
@@ -479,6 +532,7 @@ fn parse_rebuild(arguments: &[String]) -> Result<Command, ArgError> {
     })?;
     Ok(Command::Rebuild(RebuildRequest {
         devices,
+        config,
         slot_index,
         batch,
     }))
@@ -492,11 +546,32 @@ fn parse_slot(value: &str) -> Result<u16, ArgError> {
 }
 
 fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
-    let devices: Vec<PathBuf> = arguments.iter().map(PathBuf::from).collect();
-    if devices.is_empty() {
-        return Err(ArgError::NoDevices);
+    // Auch hier heisst leer: suchen. Ein Ueberwachungsskript ruft `ferrite
+    // status` ohne Argumente auf und will keine Geraeteliste pflegen.
+    let mut devices: Vec<PathBuf> = Vec::new();
+    let mut config: Option<PathBuf> = None;
+
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if argument == "--config" {
+            let value = arguments
+                .get(index + 1)
+                .ok_or_else(|| ArgError::MissingValue(argument.to_string()))?;
+            config = Some(PathBuf::from(value));
+            index += 2;
+            continue;
+        }
+        if argument.starts_with("--") {
+            return Err(ArgError::UnknownOption {
+                command: "status",
+                option: argument.to_string(),
+            });
+        }
+        devices.push(PathBuf::from(argument));
+        index += 1;
     }
-    Ok(Command::Status(StatusRequest { devices }))
+    Ok(Command::Status(StatusRequest { devices, config }))
 }
 
 /// Kein Geraet darf zweimal vorkommen.
@@ -611,6 +686,25 @@ ferrite — Werkzeug fuer ein Ferrite-Array
         Stellt den Inhalt von Slot <N> aus der Paritaet wieder her. Der
         Fortschritt steht im Superblock: Ein Abbruch kostet hoechstens
         einen Durchgang, danach geht es dort weiter, wo es aufgehoert hat.
+
+    ferrite discover [<VERZEICHNIS> ...]
+
+        Zeigt, welche Ferrite-Arrays angeschlossen sind. Ohne Angabe wird
+        gesucht, wo die Konfiguration es sagt — voreingestellt in
+        /dev/disk/by-id. Beschreibt nichts.
+
+        Dieselbe Platte steht dort oft mehrfach (`ata-…` und `wwn-…`);
+        entdoppelt wird ueber die Member-UUID aus dem Superblock.
+
+    ferrite check-flush <GERAET> [<GERAET> ...]
+
+        Fragt, ob das `FLUSH` eines Geraets ehrlich ist (Abschnitt 5.3).
+        Davon haengt ab, ob Write-Back je erlaubt sein wird. Der Test kann
+        nur `Refused`, `Undecidable` oder `Honest` sagen — und `Honest` nur
+        auf einem echten Blockgeraet ohne fluechtigen Schreibcache auf
+        einem nicht virtualisierten System.
+
+        Schreibt nichts.
 
     ferrite help | version
 ";
@@ -835,14 +929,31 @@ mod tests {
         assert_eq!(
             parse(&line),
             Ok(Command::Status(StatusRequest {
-                devices: vec![PathBuf::from("/dev/a"), PathBuf::from("/dev/b")]
+                devices: vec![PathBuf::from("/dev/a"), PathBuf::from("/dev/b")],
+                config: None,
             }))
         );
     }
 
     #[test]
-    fn status_without_devices_is_refused() {
-        assert_eq!(parse(&args(&["status"])), Err(ArgError::NoDevices));
+    fn status_without_devices_means_search_instead_of_error() {
+        // Ein Ueberwachungsskript ruft `ferrite status` ohne Argumente auf.
+        // Wo die Platten stehen, sagt die Konfiguration.
+        assert_eq!(
+            parse(&args(&["status"])),
+            Ok(Command::Status(StatusRequest {
+                devices: Vec::new(),
+                config: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_config_can_be_named_for_every_command_that_searches() {
+        for command in ["status", "scrub", "run"] {
+            let line = args(&[command, "--config", "/tmp/f.conf"]);
+            assert!(parse(&line).is_ok(), "{command} nimmt --config nicht an");
+        }
     }
 
     #[test]
@@ -884,7 +995,18 @@ mod tests {
     fn the_help_names_every_command_that_exists() {
         // Ein Werkzeug, dessen Hilfe ein Kommando verschweigt, hat es fuer
         // seine Nutzer nicht.
-        for command in ["create", "status", "run", "help", "version"] {
+        for command in [
+            "create",
+            "status",
+            "run",
+            "scrub",
+            "replace",
+            "rebuild",
+            "discover",
+            "check-flush",
+            "help",
+            "version",
+        ] {
             assert!(HELP.contains(command), "{command} fehlt in der Hilfe");
         }
     }
@@ -904,8 +1026,11 @@ mod tests {
             vec![PathBuf::from("/dev/a"), PathBuf::from("/dev/b")]
         );
         assert_eq!(plan.pool, None, "ohne --pool nur die Blockgeraete");
-        assert_eq!(plan.state_dir, PathBuf::from(DEFAULT_STATE_DIR));
-        assert_eq!(plan.fstype, "btrfs");
+        assert_eq!(
+            plan.state_dir, None,
+            "die Voreinstellung kommt aus der Konfiguration"
+        );
+        assert_eq!(plan.fstype, None);
     }
 
     #[test]
@@ -933,16 +1058,21 @@ mod tests {
             ]
         );
         assert_eq!(plan.pool, Some(PathBuf::from("/mnt/pool")));
-        assert_eq!(plan.fstype, "xfs");
+        assert_eq!(plan.fstype, Some("xfs".to_string()));
     }
 
     #[test]
-    fn run_without_devices_is_refused() {
-        assert_eq!(parse(&args(&["run"])), Err(ArgError::NoDevices));
-        assert_eq!(
-            parse(&args(&["run", "--pool", "/mnt"])),
-            Err(ArgError::NoDevices)
-        );
+    fn run_without_devices_means_search_instead_of_error() {
+        // Der Fall, fuer den die systemd-Unit gemacht ist: `ferrite run` ohne
+        // ein einziges Argument. Welche Platten dazugehoeren, steht in ihren
+        // Superbloecken; wo gesucht wird, in der Konfiguration.
+        let plan = run_plan(parse(&args(&["run"])).unwrap());
+        assert!(plan.devices.is_empty());
+        assert_eq!(plan.config, None);
+
+        let plan = run_plan(parse(&args(&["run", "--pool", "/mnt"])).unwrap());
+        assert!(plan.devices.is_empty());
+        assert_eq!(plan.pool, Some(PathBuf::from("/mnt")));
     }
 
     #[test]

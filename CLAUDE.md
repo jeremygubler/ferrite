@@ -103,7 +103,9 @@ pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
           FUSE-Schale, Lesen und Schreiben — /dev/fuse, mount(2)   [fertig]
           Passthrough — Kernel ≥ 6.9                                [offen]
           xattrs und Sperren — erst entscheiden, dann bauen          [offen]
-ctl/      create, status, run, scrub, replace, rebuild — kein Daemon [fertig]
+ctl/      create, status, run, scrub, replace, rebuild             [fertig]
+          discover, check-flush, Konfiguration, systemd-Units      [fertig]
+          Betriebstagebuch und Benachrichtigung                     [offen]
           gRPC-Daemon und Web-UI                                     [offen]
 ```
 

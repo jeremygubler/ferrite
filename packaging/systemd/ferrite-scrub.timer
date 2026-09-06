@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Bit-Rot findet man nur, wenn man sucht.
+
+[Unit]
+Description=Ferrite — Scrub nach Zeitplan
+
+[Timer]
+# Monatlich. Oefter kostet Plattenlaufzeit ohne viel zu gewinnen, seltener
+# laesst einen stillen Fehler zu lange liegen — bis zum naechsten
+# Plattenausfall, und dann ist es zu spaet.
+OnCalendar=monthly
+# Nach einem Ausfall nachholen, statt bis zum naechsten Monat zu warten.
+Persistent=true
+# Nicht alle Maschinen einer Flotte zur selben Minute.
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

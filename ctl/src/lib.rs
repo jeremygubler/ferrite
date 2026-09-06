@@ -25,6 +25,10 @@
 //! Pool — braucht einen Prozess, der bleibt, und das ist der naechste Schritt.
 
 pub mod args;
+pub mod config;
+/// Ferrite findet seine Platten selbst. Die Suche braucht ein Betriebssystem
+/// mit Blockgeraeten, das Ordnen der Fundstellen nicht.
+pub mod discover;
 /// Scrub, Ersatz und Rebuild. Braucht Geraete, aber weder ublk noch FUSE.
 #[cfg(unix)]
 pub mod repair;

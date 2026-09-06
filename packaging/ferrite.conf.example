@@ -1,0 +1,28 @@
+# /etc/ferrite/ferrite.conf
+#
+# Welche Platte welche Rolle traegt, steht in ihrem Superblock und nicht hier.
+# Diese Datei sagt nur, wo gesucht wird und was mit dem Ergebnis geschehen soll.
+
+# Welches Array. Weglassen, wenn nur eines angeschlossen ist.
+# array = 3898328e-a28c-41e4-9c5a-267701f28c12
+
+# Wo nach Members gesucht wird. Mehrfach erlaubt.
+scan = /dev/disk/by-id
+
+# Wo der vereinigte Baum erscheint. Weglassen fuer nur die Blockgeraete.
+pool = /mnt/pool
+state-dir = /run/ferrite
+fstype = btrfs
+
+# Platzierung neuer Dateien.
+allocation = most-free      # most-free | fill-up | round-robin
+split = 1                   # Tiefe, oder `anywhere`
+min-free = 20G              # was auf jeder Platte frei bleibt
+overflow = spill            # spill | fail
+
+# Wird bei einem Befund aufgerufen; bekommt den Bericht auf der
+# Standardeingabe. Drei Zeilen Shell reichen fuer eine Nachricht aufs Telefon.
+# notify = /usr/local/lib/ferrite/notify
+
+# Betriebstagebuch: eine Zeile je Ereignis, zum Mitschreiben ueber Monate.
+journal = /var/lib/ferrite/journal

@@ -28,6 +28,8 @@
 //! Die Paritaet hat niemanden, der sie prueft — sie ist die abgeleitete
 //! Groesse und wird deshalb neu abgeleitet.
 
+use std::path::PathBuf;
+
 use ferrite_engine::{ArrayWriter, EngineError};
 use ferrite_format::superblock::MemberState;
 
@@ -67,7 +69,9 @@ impl ScrubOutcome {
 /// durch, wird es Block fuer Block nachgeprueft. Der Betreiber soll wissen,
 /// **wo** es klemmt, und nicht nur, dass irgendwo etwas nicht stimmt.
 pub fn scrub(request: &ScrubRequest) -> Result<ScrubOutcome> {
-    let mut writer = crate::run::open_array(&request.devices)?;
+    let config = crate::run::load_config(request.config.as_deref())?;
+    let devices = crate::run::devices_or_search(&request.devices, &config)?;
+    let mut writer = crate::run::open_array(&devices)?;
     let block = 1u64 << writer.block_size_log2();
     let blocks = total_blocks(&writer)?;
 
@@ -170,7 +174,9 @@ fn total_blocks(writer: &ArrayWriter) -> Result<u64> {
 
 /// Stellt einen Member aus der Paritaet wieder her.
 pub fn rebuild(request: &RebuildRequest) -> Result<()> {
-    let mut writer = crate::run::open_array(&request.devices)?;
+    let config = crate::run::load_config(request.config.as_deref())?;
+    let devices = crate::run::devices_or_search(&request.devices, &config)?;
+    let mut writer = crate::run::open_array(&devices)?;
     let state = writer
         .member(request.slot_index)
         .map_err(CtlError::Engine)?
@@ -331,4 +337,89 @@ fn at(path: &std::path::Path) -> impl FnOnce(EngineError) -> CtlError + '_ {
         path: path.to_path_buf(),
         source,
     }
+}
+
+// --- Flush-Test ------------------------------------------------------------
+
+/// Fragt ein Geraet, ob sein `FLUSH` ehrlich ist (Abschnitt 5.3).
+///
+/// # Warum es dieses Kommando gibt
+///
+/// Write-Back ist gesperrt, bis der Test `Honest` sagt, und er hat das auf
+/// keiner Maschine getan, die dieses Projekt bisher gesehen hat — alle waren
+/// virtualisiert. Auf blankem Blech kann er es sagen. Die Frage laesst sich
+/// nur dort beantworten, wo die Platte steht, und deshalb gehoert sie in ein
+/// Kommando statt in einen Test.
+///
+/// # Was der Test nicht kann
+///
+/// Beweisen, dass ein Geraet ehrlich ist. Er sammelt, was die Plattform
+/// hergibt, und nur eine einzige Kombination fuehrt zu `Honest`: echtes
+/// Blockgeraet, kein fluechtiger Schreibcache, nicht virtualisiert. Alles
+/// andere heisst „nicht entscheidbar", und das ist nach Abschnitt 5.3
+/// dasselbe wie „nein".
+///
+/// Geschrieben wird **nichts**. Die Schreibprobe zerstoert den Bereich, auf
+/// den sie zeigt; sie gehoert ins Anlegen eines Arrays und nicht in eine
+/// Auskunft.
+pub fn check_flush(devices: &[PathBuf]) -> Result<bool> {
+    use ferrite_engine::{FlushVerdict, MemberDevice, WriteMode};
+
+    let mut all_honest = true;
+    for path in devices {
+        let device = MemberDevice::open_read_only(path).map_err(at(path))?;
+        let check = ferrite_engine::check_flush(&device, None);
+
+        println!("{}", path.display());
+        println!("  Geraet:        {:?}", check.facts.kind);
+        println!(
+            "  Schreibcache:  {}",
+            match check.facts.write_cache {
+                Some(cache) => format!("{cache:?}"),
+                None => "der Kernel sagt nichts dazu".to_string(),
+            }
+        );
+        println!(
+            "  Virtualisiert: {}",
+            match check.facts.virtualized {
+                Some(true) => "ja — jede Angabe kann die des Hypervisors sein",
+                Some(false) => "nein",
+                None => "nicht feststellbar",
+            }
+        );
+        println!(
+            "  Flush:         {}",
+            if check.facts.flush_succeeded {
+                "ohne Fehler"
+            } else {
+                "fehlgeschlagen"
+            }
+        );
+        println!("  Urteil:        {:?} — {}", check.verdict, check.reason);
+        println!(
+            "  Betriebsart:   {}\n",
+            match check.write_mode() {
+                WriteMode::WriteBack => "Write-Back waere erlaubt",
+                WriteMode::WriteThrough => "Write-Through (Abschnitt 5.3)",
+            }
+        );
+
+        if check.verdict != FlushVerdict::Honest {
+            all_honest = false;
+        }
+    }
+
+    if all_honest {
+        println!(
+            "Alle angegebenen Geraete kaemen als Log-Member fuer Write-Back in Frage.\n\
+             Der Modus selbst ist noch nicht gebaut — aber die Voraussetzung dafuer\n\
+             stand bisher auf keiner Maschine, die dieses Projekt gesehen hat."
+        );
+    } else {
+        println!(
+            "Write-Through. Das ist der Normalfall und kein Mangel: Abschnitt 5.3\n\
+             stellt „faellt negativ aus\" und „ist nicht durchfuehrbar\" gleich."
+        );
+    }
+    Ok(all_honest)
 }

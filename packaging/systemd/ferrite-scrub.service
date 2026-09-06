@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Ein Scrub-Durchlauf. Gestartet vom Timer daneben, nicht von Hand.
+
+[Unit]
+Description=Ferrite — Paritaet gegen die Daten pruefen
+Documentation=https://github.com/jeremygubler/ferrite
+# Nur waehrend das Array laeuft: Ein Scrub auf ein Array, das gerade nicht
+# geoeffnet ist, oeffnet es selbst — und zwei Oeffnungen gleichzeitig sind
+# eine Wettlaufsituation um dieselben Superbloecke.
+Requisite=ferrite.service
+After=ferrite.service
+
+[Service]
+Type=oneshot
+
+# **Ohne --repair.** Ein Zeitplan, der von selbst Paritaet neu bildet,
+# ueberschriebe eine veraltete Paritaet auch dann, wenn die Ursache noch da
+# ist. Erst ansehen, dann entscheiden.
+ExecStart=/usr/bin/ferrite scrub
+
+# Rueckgabewert 1 heisst „Abweichungen gefunden" und ist kein Fehler des
+# Dienstes, sondern ein Befund. Er soll trotzdem als Fehlschlag im Journal
+# stehen, damit `OnFailure=` greift.
+SuccessExitStatus=0
+
+Nice=19
+IOSchedulingClass=idle

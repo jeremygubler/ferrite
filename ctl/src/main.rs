@@ -34,11 +34,13 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Create(plan) => execute_create(&plan),
-        Command::Status(request) => execute_status(&request.devices),
+        Command::Status(request) => execute_status(&request),
         Command::Run(plan) => execute_run(&plan),
         Command::Scrub(request) => execute_scrub(&request),
         Command::Replace(plan) => execute_replace(&plan),
         Command::Rebuild(request) => execute_rebuild(&request),
+        Command::CheckFlush(request) => execute_check_flush(&request.devices),
+        Command::Discover(request) => execute_discover(&request),
     }
 }
 
@@ -61,8 +63,8 @@ fn execute_create(plan: &ferrite_ctl::CreatePlan) -> ExitCode {
 }
 
 #[cfg(unix)]
-fn execute_status(devices: &[std::path::PathBuf]) -> ExitCode {
-    let report = ferrite_ctl::run::status(devices);
+fn execute_status(request: &ferrite_ctl::args::StatusRequest) -> ExitCode {
+    let report = ferrite_ctl::run::status(&request.devices, request.config.as_deref());
     print!("{}", report.text);
     ExitCode::from(report.health.exit_code())
 }
@@ -76,7 +78,7 @@ fn execute_create(_plan: &ferrite_ctl::CreatePlan) -> ExitCode {
 }
 
 #[cfg(not(unix))]
-fn execute_status(_devices: &[std::path::PathBuf]) -> ExitCode {
+fn execute_status(_request: &ferrite_ctl::args::StatusRequest) -> ExitCode {
     eprintln!("ferrite status braucht ein System mit Blockgeraeten.");
     ExitCode::from(EXIT_USAGE)
 }
@@ -154,5 +156,79 @@ fn execute_replace(_plan: &ferrite_ctl::args::ReplacePlan) -> ExitCode {
 #[cfg(not(unix))]
 fn execute_rebuild(_request: &ferrite_ctl::args::RebuildRequest) -> ExitCode {
     eprintln!("ferrite rebuild braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+#[cfg(unix)]
+fn execute_check_flush(devices: &[std::path::PathBuf]) -> ExitCode {
+    match ferrite_ctl::repair::check_flush(devices) {
+        // Der haeufige Ausgang ist `Undecidable`, und der ist kein Fehler.
+        // Der Rueckgabewert sagt trotzdem, ob Write-Back in Frage kaeme —
+        // sonst muesste ein Skript den Text lesen.
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn execute_discover(request: &ferrite_ctl::args::DiscoverRequest) -> ExitCode {
+    let directories = if request.scan.is_empty() {
+        ferrite_ctl::config::Config::default().scan
+    } else {
+        request.scan.clone()
+    };
+
+    let scan = ferrite_ctl::discover::scan(&directories);
+    if scan.arrays.is_empty() {
+        println!(
+            "Kein Ferrite-Array gefunden. Gesucht wurde in:\n  {}",
+            directories
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+        return ExitCode::from(1);
+    }
+
+    for (uuid, members) in &scan.arrays {
+        println!("Array {uuid}");
+        for member in members {
+            println!(
+                "  {:<9} {}",
+                match member.superblock.role {
+                    ferrite_format::superblock::Role::Data =>
+                        format!("Slot {}", member.superblock.slot_index),
+                    ferrite_format::superblock::Role::ParityP => "ParityP".to_string(),
+                    ferrite_format::superblock::Role::ParityQ => "ParityQ".to_string(),
+                    ferrite_format::superblock::Role::Log => "Log".to_string(),
+                },
+                member.path.display()
+            );
+        }
+        println!();
+    }
+    if scan.duplicates > 0 {
+        println!(
+            "{} von {} Pfaden waren zweite Namen derselben Platte.",
+            scan.duplicates, scan.looked_at
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(unix))]
+fn execute_check_flush(_devices: &[std::path::PathBuf]) -> ExitCode {
+    eprintln!("ferrite check-flush braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+#[cfg(not(unix))]
+fn execute_discover(_request: &ferrite_ctl::args::DiscoverRequest) -> ExitCode {
+    eprintln!("ferrite discover braucht ein System mit Blockgeraeten.");
     ExitCode::from(EXIT_USAGE)
 }

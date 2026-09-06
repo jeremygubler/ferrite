@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Ferrite als Dienst.
+#
+# `ferrite run` ohne ein einziges Argument: Welche Platten dazugehoeren, steht
+# in ihren Superbloecken, und wo gesucht wird, in /etc/ferrite/ferrite.conf.
+# Eine Geraeteliste in dieser Datei waere ein zweiter Ort fuer denselben
+# Zustand — und der weicht eines Tages ab.
+
+[Unit]
+Description=Ferrite — Paritaets-Array und Pool
+Documentation=https://github.com/jeremygubler/ferrite
+# `local-fs.target`: Die Konfiguration liegt unter /etc, und die
+# Einhaengepunkte muessen da sein.
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/ferrite run
+
+# SIGTERM ist der vorgesehene Weg: `run` haengt danach den Pool aus, dann die
+# Members, dann die Blockgeraete — in dieser Reihenfolge, sonst wartet der
+# Kernel ohne Zeitgrenze.
+KillSignal=SIGTERM
+
+# Grosszuegig, und mit Absicht: Steht noch ein Prozess im Pool, wartet das
+# Aushaengen auf ihn. Ein zu knapper Wert liesse systemd mitten im Abbauen
+# `SIGKILL` schicken — und dann bleibt ein ublk-Geraet stehen, das niemand
+# mehr abbauen kann.
+TimeoutStopSec=300
+
+# Ein Neustart nach einem Absturz ist richtig: Das Recovery aus Abschnitt 5.2
+# laeuft beim Start und raeumt auf, was der Absturz hinterlassen hat.
+Restart=on-failure
+RestartSec=10
+
+# ublk und FUSE brauchen Root. Was sich trotzdem einschraenken laesst, ist
+# eingeschraenkt.
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=no
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

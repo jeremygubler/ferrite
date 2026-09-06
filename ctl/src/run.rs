@@ -63,6 +63,13 @@ pub enum CtlError {
         raw_os_error: Option<i32>,
     },
     Pool(ferrite_pool::PoolError),
+    /// Die Konfigurationsdatei ist nicht benutzbar.
+    Config {
+        path: PathBuf,
+        reason: String,
+    },
+    /// Aus dem Suchlauf wurde kein Array.
+    Discover(String),
 }
 
 impl fmt::Display for CtlError {
@@ -97,6 +104,8 @@ impl fmt::Display for CtlError {
                 None => write!(f, "{}: {kind:?}", path.display()),
             },
             Self::Pool(error) => write!(f, "{error}"),
+            Self::Config { path, reason } => write!(f, "{}: {reason}", path.display()),
+            Self::Discover(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -220,7 +229,35 @@ fn roles_of(plan: &CreatePlan) -> Vec<(Role, u16)> {
 /// Ein Geraet, das sich nicht oeffnen laesst, bricht den Aufruf **nicht** ab:
 /// Genau dann will man den Bericht ja sehen. Es erscheint darin als „nicht
 /// lesbar" und macht das Array unvollstaendig — was `assemble` dann auch sagt.
-pub fn status(devices: &[PathBuf]) -> Report {
+pub fn status(devices: &[PathBuf], named: Option<&Path>) -> Report {
+    // Leere Liste heisst suchen. Scheitert die Suche, wird das gemeldet und
+    // nicht als „nichts gefunden" ausgegeben — der Unterschied zwischen
+    // „keine Platte da" und „zwei Arrays, sag welches" ist der ganze Punkt.
+    let config = match load_config(named) {
+        Ok(config) => config,
+        Err(error) => {
+            return Report {
+                text: format!(
+                    "{error}
+"
+                ),
+                health: crate::report::Health::Broken,
+            }
+        }
+    };
+    let devices = match devices_or_search(devices, &config) {
+        Ok(devices) => devices,
+        Err(error) => {
+            return Report {
+                text: format!(
+                    "{error}
+"
+                ),
+                health: crate::report::Health::Broken,
+            }
+        }
+    };
+
     let seen: Vec<Seen> = devices
         .iter()
         .map(|path| Seen {
@@ -258,6 +295,52 @@ fn now_unix() -> u64 {
         // Eine Uhr vor 1970 macht ein Array nicht unbrauchbar; das Feld ist
         // Information, keine Gueltigkeitsregel.
         .unwrap_or(0)
+}
+
+// --- Konfiguration und Suche ----------------------------------------------
+
+/// Liest die Konfiguration, oder nimmt die Voreinstellungen.
+///
+/// Eine fehlende Datei am ueblichen Ort ist kein Fehler — dann arbeitet
+/// Ferrite mit den Voreinstellungen, und wer sie nicht braucht, muss keine
+/// anlegen. Eine **ausdruecklich benannte** Datei, die fehlt, ist einer: Wer
+/// `--config` schreibt, meint eine bestimmte.
+pub fn load_config(named: Option<&Path>) -> Result<crate::config::Config> {
+    let path = named
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(crate::config::DEFAULT_PATH));
+
+    match std::fs::read_to_string(&path) {
+        Ok(text) => crate::config::Config::parse(&text).map_err(|error| CtlError::Config {
+            path: path.clone(),
+            reason: error.to_string(),
+        }),
+        Err(_) if named.is_none() => Ok(crate::config::Config::default()),
+        Err(error) => Err(CtlError::Config {
+            path,
+            reason: error.to_string(),
+        }),
+    }
+}
+
+/// Die Geraeteliste — von der Kommandozeile oder aus dem Suchlauf.
+///
+/// Eine leere Liste ist die Aufforderung zu suchen und kein Fehler. Genau so
+/// rufen die systemd-Units auf: `ferrite run`, `ferrite scrub` — ohne ein
+/// einziges Argument.
+pub fn devices_or_search(
+    explicit: &[PathBuf],
+    config: &crate::config::Config,
+) -> Result<Vec<PathBuf>> {
+    if !explicit.is_empty() {
+        return Ok(explicit.to_vec());
+    }
+
+    let scan = crate::discover::scan(&config.scan);
+    let members = scan
+        .pick(config.array.as_deref())
+        .map_err(|error| CtlError::Discover(error.to_string()))?;
+    Ok(crate::discover::paths(members))
 }
 
 // --- Das Array oeffnen ----------------------------------------------------

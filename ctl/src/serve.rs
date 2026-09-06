@@ -80,7 +80,8 @@ pub fn run(plan: &RunPlan) -> Result<()> {
         });
     }
 
-    let writer = crate::run::open_array(&plan.devices)?;
+    let settings = resolve(plan)?;
+    let writer = crate::run::open_array(&settings.devices)?;
 
     // Je Slot seine **eigene** Groesse. Members duerfen verschieden gross
     // sein — das ist der Kern des Projekts, und ein Blockgeraet, das fuer
@@ -123,8 +124,8 @@ pub fn run(plan: &RunPlan) -> Result<()> {
         devices.push((slot, device, path));
     }
 
-    let mounted = match &plan.pool {
-        Some(mountpoint) => match mount_pool(plan, mountpoint, &devices) {
+    let mounted = match &settings.pool {
+        Some(mountpoint) => match mount_pool(&settings, mountpoint, &devices) {
             Ok(mounted) => Some(mounted),
             Err(error) => {
                 // Was schon eingehaengt war, ist in `mount_pool` bereits
@@ -155,6 +156,45 @@ pub fn run(plan: &RunPlan) -> Result<()> {
     Ok(())
 }
 
+// --- Kommandozeile und Konfiguration zusammenlegen -------------------------
+
+/// Was `run` wirklich tut.
+#[derive(Debug, Clone)]
+struct Settings {
+    devices: Vec<PathBuf>,
+    pool: Option<PathBuf>,
+    state_dir: PathBuf,
+    fstype: String,
+    policy: SharePolicy,
+}
+
+/// Legt Kommandozeile und Konfiguration uebereinander.
+///
+/// **Die Kommandozeile gewinnt.** Wer beim Suchen eines Fehlers etwas von Hand
+/// angibt, will nicht, dass eine Datei es ueberstimmt.
+///
+/// Die Geraeteliste ist der Sonderfall: Ist sie leer, wird gesucht, wo die
+/// Konfiguration es sagt. Genau so startet die systemd-Unit — `ferrite run`
+/// ohne ein einziges Argument.
+fn resolve(plan: &RunPlan) -> Result<Settings> {
+    let config = crate::run::load_config(plan.config.as_deref())?;
+    let devices = crate::run::devices_or_search(&plan.devices, &config)?;
+    if plan.devices.is_empty() {
+        println!("{} Members gefunden.", devices.len());
+    }
+
+    Ok(Settings {
+        devices,
+        pool: plan.pool.clone().or(config.pool.clone()),
+        state_dir: plan
+            .state_dir
+            .clone()
+            .unwrap_or_else(|| config.state_dir.clone()),
+        fstype: plan.fstype.clone().unwrap_or_else(|| config.fstype.clone()),
+        policy: config.share_policy(),
+    })
+}
+
 // --- Der Pool -------------------------------------------------------------
 
 /// Was eingehaengt wurde und wieder abzubauen ist.
@@ -181,7 +221,7 @@ impl Mounted {
 }
 
 fn mount_pool(
-    plan: &RunPlan,
+    settings: &Settings,
     mountpoint: &Path,
     devices: &[(u16, UblkDevice, String)],
 ) -> Result<Mounted> {
@@ -189,10 +229,10 @@ fn mount_pool(
     let mut branches = Vec::new();
 
     for (slot, _, block_path) in devices {
-        let target = plan.state_dir.join(format!("slot{slot}"));
+        let target = settings.state_dir.join(format!("slot{slot}"));
         std::fs::create_dir_all(&target).map_err(io_at(&target))?;
 
-        if let Err(error) = mount(block_path, &target, &plan.fstype) {
+        if let Err(error) = mount(block_path, &target, &settings.fstype) {
             for done in &members {
                 let _ = unmount(done);
             }
@@ -201,7 +241,7 @@ fn mount_pool(
                 // gemeldet, damit ein Mensch entscheidet.
                 Some(libc::EINVAL) => CtlError::NoFilesystem {
                     device: block_path.clone(),
-                    fstype: plan.fstype.clone(),
+                    fstype: settings.fstype.clone(),
                 },
                 _ => CtlError::Mount {
                     path: target.clone(),
@@ -225,10 +265,11 @@ fn mount_pool(
         }
     };
 
+    let policy = settings.policy.clone();
     // Die Schleife laeuft in einem eigenen Thread; der Hauptthread wartet auf
     // das Signal. Andersherum haette das Signal keinen, der es bemerkt.
     let worker = std::thread::spawn(move || {
-        let mut filesystem = PoolFs::new(branches, SharePolicy::default());
+        let mut filesystem = PoolFs::new(branches, policy);
         if let Err(error) = filesystem.run(&connection) {
             eprintln!("Der Pool ist gestolpert: {error}");
         }

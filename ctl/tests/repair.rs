@@ -455,3 +455,114 @@ fn a_degraded_array_can_still_be_checked() {
         stdout(&output)
     );
 }
+
+// --- Konfiguration und Suche ----------------------------------------------
+
+#[test]
+fn status_finds_the_array_through_the_configuration() {
+    // Der Fall, fuer den die systemd-Unit gemacht ist: kein Argument ausser
+    // der Konfiguration. Die Platten stehen zweimal im Suchverzeichnis, wie
+    // unter /dev/disk/by-id.
+    let array = Array::new("suchen");
+    let by_id = array.disks.0.join("by-id");
+    std::fs::create_dir_all(&by_id).expect("Verzeichnis");
+    for (index, path) in array.paths.iter().enumerate() {
+        std::os::unix::fs::symlink(path, by_id.join(format!("ata-{index}"))).expect("Symlink");
+        std::os::unix::fs::symlink(path, by_id.join(format!("wwn-{index}"))).expect("Symlink");
+    }
+
+    let config = array.disks.0.join("ferrite.conf");
+    std::fs::write(&config, format!("scan = {}\n", by_id.display())).expect("Konfiguration");
+    let config = config.display().to_string();
+
+    let output = ferrite(&["status", "--config", &config]);
+    assert_eq!(code(&output), 0, "{}{}", stdout(&output), stderr(&output));
+    assert!(stdout(&output).contains("Alle Members in Ordnung"));
+    // Fuenf Members, nicht zehn: Die zweiten Namen sind entdoppelt.
+    assert_eq!(
+        stdout(&output).matches("/by-id/").count(),
+        5,
+        "die doppelten Namen wurden nicht entdoppelt: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn scrub_finds_the_array_through_the_configuration() {
+    let array = Array::new("suchen-scrub");
+    let by_id = array.disks.0.join("by-id");
+    std::fs::create_dir_all(&by_id).expect("Verzeichnis");
+    for (index, path) in array.paths.iter().enumerate() {
+        std::os::unix::fs::symlink(path, by_id.join(format!("ata-{index}"))).expect("Symlink");
+    }
+    let config = array.disks.0.join("ferrite.conf");
+    std::fs::write(&config, format!("scan = {}\n", by_id.display())).expect("Konfiguration");
+    let config = config.display().to_string();
+
+    let output = ferrite(&["scrub", "--config", &config]);
+    assert_eq!(code(&output), 0, "{}{}", stdout(&output), stderr(&output));
+    assert!(stdout(&output).contains("passt zu allen Data-Members"));
+}
+
+#[test]
+fn a_typo_in_the_configuration_stops_the_command() {
+    // Ein stillschweigend ignorierter Schluessel laesst den Betreiber
+    // glauben, seine Einstellung gelte.
+    let array = Array::new("tippfehler");
+    let config = array.disks.0.join("ferrite.conf");
+    std::fs::write(&config, "scaan = /dev\n").expect("Konfiguration");
+    let config = config.display().to_string();
+
+    let output = ferrite(&["status", "--config", &config]);
+    assert_ne!(code(&output), 0);
+    let message = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(message.contains("scaan"), "{message}");
+    assert!(message.contains("Zeile 1"), "{message}");
+}
+
+#[test]
+fn a_named_configuration_that_is_missing_is_an_error() {
+    // Eine fehlende Datei am ueblichen Ort ist keiner. Eine ausdruecklich
+    // benannte schon: Wer `--config` schreibt, meint eine bestimmte.
+    let output = ferrite(&["status", "--config", "/gibt/es/nicht.conf"]);
+    assert_ne!(code(&output), 0);
+}
+
+#[test]
+fn two_arrays_without_a_name_are_refused_instead_of_guessed() {
+    // Eines zu waehlen hiesse raten, und die falsche Wahl haenge ein fremdes
+    // Array ein.
+    let first = Array::new("zwei-a");
+    let second = Array::new("zwei-b");
+    let by_id = first.disks.0.join("by-id");
+    std::fs::create_dir_all(&by_id).expect("Verzeichnis");
+    for (index, path) in first.paths.iter().chain(second.paths.iter()).enumerate() {
+        std::os::unix::fs::symlink(path, by_id.join(format!("d-{index}"))).expect("Symlink");
+    }
+    let config = first.disks.0.join("ferrite.conf");
+    std::fs::write(&config, format!("scan = {}\n", by_id.display())).expect("Konfiguration");
+    let config = config.display().to_string();
+
+    let output = ferrite(&["status", "--config", &config]);
+    assert_ne!(code(&output), 0);
+    let message = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(message.contains("mehrere Arrays"), "{message}");
+    assert!(
+        message.contains("array = "),
+        "der Ausweg muss dastehen: {message}"
+    );
+}
+
+#[test]
+fn check_flush_is_honest_about_a_file() {
+    // Eine gewoehnliche Datei kann die Frage nicht beantworten, und der Test
+    // sagt das — statt „ja" zu raten.
+    let array = Array::new("flush");
+    let output = ferrite(&["check-flush", &array.paths[4]]);
+
+    assert_eq!(code(&output), 1, "kein Honest fuer eine Datei");
+    let text = stdout(&output);
+    assert!(text.contains("RegularFile"), "{text}");
+    assert!(text.contains("Undecidable"), "{text}");
+    assert!(text.contains("Write-Through"), "{text}");
+}
