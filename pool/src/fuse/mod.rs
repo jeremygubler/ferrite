@@ -25,8 +25,20 @@
 //! [`place`](crate::place) — die Regeln aus `policy` gelten hier also
 //! wirklich und nicht nur auf dem Papier.
 //!
-//! Es fehlt der Passthrough. Bis dahin geht jedes Byte durch diesen Prozess;
-//! richtig ist das Ergebnis auch so, nur langsamer.
+//! Der Passthrough steht ebenfalls. Auf einem Kernel ab 6.9 bekommt der
+//! Kernel beim `OPEN` den Dateideskriptor der Datei auf dem Branch hinterlegt
+//! und bedient Lesen und Schreiben danach selbst — dieser Prozess sieht kein
+//! Byte mehr. Fehlt eine der Voraussetzungen, laeuft alles durch ihn:
+//! langsamer, aber richtig. Der Rueckfall ist deshalb kein Fehlerpfad,
+//! sondern der zweite gewoehnliche Ausgang.
+//!
+//! Es braucht dafuer dreierlei, und jedes einzelne scheitert still:
+//! `FUSE_PASSTHROUGH` in `flags2` der `INIT`-Antwort, `FUSE_INIT_EXT` in
+//! `flags` — ohne das sieht der Kernel `flags2` gar nicht an — und ein
+//! `max_stack_depth` groesser null. Ist eines falsch, gelingt der Mount, und
+//! nur der Datendurchsatz bleibt zurueck. Deshalb zaehlt
+//! [`Counters`](server::Counters) mit, und deshalb pruefen die Mount-Tests
+//! nicht den Inhalt, sondern die Zahl der `READ`-Anfragen, die hier ankamen.
 //!
 //! # Was ein Pool nicht kann
 //!
@@ -40,8 +52,9 @@
 //!
 //! # Voraussetzungen
 //!
-//! Linux, `/dev/fuse`, und das Recht einzuhaengen. Fuer den spaeteren
-//! Passthrough zusaetzlich Kernel ≥ 6.9.
+//! Linux, `/dev/fuse`, und das Recht einzuhaengen. Fuer den Passthrough
+//! zusaetzlich Kernel ≥ 6.9 und `CAP_SYS_ADMIN` — das `ioctl`, das einen
+//! Deskriptor hinterlegt, verlangt es.
 
 pub mod abi;
 pub mod backing;
@@ -52,7 +65,7 @@ pub mod server;
 pub use backing::BranchRoot;
 pub use connection::{Connection, MountOptions};
 pub use inode::InodeTable;
-pub use server::PoolFs;
+pub use server::{Counters, PoolFs};
 
 use std::path::Path;
 

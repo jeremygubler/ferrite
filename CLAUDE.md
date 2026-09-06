@@ -101,7 +101,7 @@ broker/   btrfs-Scrub-Befund lesen, rekonstruieren, zurückschreiben [fertig]
           Lesefehler zur Laufzeit — braucht den Chunk-Baum           [offen]
 pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
           FUSE-Schale, Lesen und Schreiben — /dev/fuse, mount(2)   [fertig]
-          Passthrough — Kernel ≥ 6.9                                [offen]
+          Passthrough — Kernel ≥ 6.9                              [fertig]
           xattrs und Sperren — erst entscheiden, dann bauen          [offen]
 ctl/      create, status, run, scrub, replace, rebuild             [fertig]
           discover, check-flush, Konfiguration, systemd-Units      [fertig]
@@ -151,7 +151,7 @@ virtualisierten Log-Geräten gilt Abschnitt 5.3 des Formatdokuments
 `format/`, `parity/`, Fuzzing und CI brauchen weder speziellen Kernel noch
 Platten und laufen überall; die Entscheidungen in `pool/` ebenso. Die
 FUSE-Schale von `pool/` braucht `/dev/fuse` und das Recht einzuhängen, für den
-späteren Passthrough Kernel ≥ 6.9; sie läuft in CI.
+Passthrough Kernel ≥ 6.9; sie läuft in CI.
 Der Power-Fail-Teil des Crash-Harness braucht nur Linux und laeuft in CI. Die
 Tests gegen fehlerhafte Geraete brauchen zusaetzlich `dm-dust`/`dm-flakey`
 und Root; sie laufen ebenfalls in CI.

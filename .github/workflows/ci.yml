@@ -240,9 +240,19 @@ jobs:
       - name: /dev/fuse bereitstellen und pruefen
         run: |
           sudo modprobe fuse || true
-          echo "Kernel: $(uname -r)"
+          KERNEL=$(uname -r)
+          echo "Kernel: $KERNEL"
           test -c /dev/fuse || { echo "/dev/fuse fehlt — der Job haette nichts geprueft"; exit 1; }
           ls -l /dev/fuse
+          # Der Passthrough braucht 6.9. Ist der Runner aelter, ueberspringen
+          # sich genau die Tests, die ihn nachweisen — das gehoert sichtbar
+          # ins Log und nicht in eine Zeile, die niemand liest.
+          MAJOR=${KERNEL%%.*}; REST=${KERNEL#*.}; MINOR=${REST%%.*}
+          if [ "$MAJOR" -gt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -ge 9 ]; }; then
+            echo "Passthrough: wird geprueft."
+          else
+            echo "ACHTUNG: Kernel $KERNEL kennt keinen Passthrough — diese Tests ueberspringen sich."
+          fi
 
       - name: Testbinary bauen
         run: cargo test -p ferrite-pool --test mount --no-run

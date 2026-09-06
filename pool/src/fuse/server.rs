@@ -34,6 +34,8 @@
 use std::collections::HashMap;
 use std::fs::{File, Metadata};
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::branch::{Branch, BranchId};
 use crate::error::{PoolError, Result};
@@ -66,6 +68,32 @@ struct Listed {
     ino: u64,
 }
 
+/// Was der Server unterwegs gezaehlt hat.
+///
+/// Von aussen lesbar, weil sich sonst nicht pruefen laesst, ob der Passthrough
+/// wirklich greift: Ein Test, der nur den Inhalt vergleicht, saehe dasselbe,
+/// ob der Kernel die Datei selbst bedient oder dieser Prozess es tut.
+/// `reads` ist dabei die Zahl, auf die es ankommt — bleibt sie null, waehrend
+/// der Inhalt stimmt, hat der Kernel gelesen.
+#[derive(Debug, Default)]
+pub struct Counters {
+    /// Wurde der Passthrough beim `INIT` ausgehandelt?
+    pub passthrough_available: AtomicBool,
+    /// Dateien, die mit hinterlegtem Deskriptor geoeffnet wurden.
+    pub passthrough_opens: AtomicU64,
+    /// Dateien, bei denen das nicht ging — der gewoehnliche Weg.
+    pub plain_opens: AtomicU64,
+    /// `READ`-Anfragen, die dieser Prozess bedient hat.
+    pub reads: AtomicU64,
+    /// `WRITE`-Anfragen, die dieser Prozess bedient hat.
+    pub writes: AtomicU64,
+    /// Erfolgreich wieder freigegebene `backing_id`s.
+    ///
+    /// Muss am Ende zu [`Counters::passthrough_opens`] passen. Weicht es ab,
+    /// haelt der Kernel Verweise auf Dateien, die niemand mehr braucht.
+    pub backing_closes: AtomicU64,
+}
+
 /// Der Pool als FUSE-Server.
 #[derive(Debug)]
 pub struct PoolFs {
@@ -73,10 +101,22 @@ pub struct PoolFs {
     policy: SharePolicy,
     inodes: InodeTable,
     files: HashMap<u64, File>,
+    /// Zu jedem Dateihandle die `backing_id`, falls eine hinterlegt wurde.
+    backing: HashMap<u64, i32>,
     dirs: HashMap<u64, Vec<Listed>>,
     next_fh: u64,
     /// Der zuletzt benutzte Branch, fuer [`Allocation::RoundRobin`].
     cursor: Option<BranchId>,
+    /// Hat der Kernel den Passthrough angeboten — und wollen wir ihn?
+    passthrough: bool,
+    /// Darf ueberhaupt verhandelt werden?
+    ///
+    /// Nur fuer Tests aus: Greift der Passthrough, sieht dieser Prozess kein
+    /// `READ` und kein `WRITE` mehr, und die beiden Behandler waeren auf einem
+    /// neuen Kernel ungetestet. Ein Schalter ist ehrlicher, als sich auf einen
+    /// alten Kernel im Testlauf zu verlassen.
+    allow_passthrough: bool,
+    counters: Arc<Counters>,
 }
 
 impl PoolFs {
@@ -86,10 +126,25 @@ impl PoolFs {
             policy,
             inodes: InodeTable::new(),
             files: HashMap::new(),
+            backing: HashMap::new(),
             dirs: HashMap::new(),
             next_fh: 1,
             cursor: None,
+            passthrough: false,
+            allow_passthrough: true,
+            counters: Arc::new(Counters::default()),
         }
+    }
+
+    /// Schaltet den Passthrough ab, bevor eingehaengt wird.
+    pub fn without_passthrough(mut self) -> Self {
+        self.allow_passthrough = false;
+        self
+    }
+
+    /// Die Zaehler — abzuholen, **bevor** der Server in einen Thread wandert.
+    pub fn counters(&self) -> Arc<Counters> {
+        Arc::clone(&self.counters)
     }
 
     /// Bedient Anfragen, bis der Pool ausgehaengt wird.
@@ -109,7 +164,7 @@ impl PoolFs {
             let end = (header.len as usize).min(read);
             let data = &buffer[abi::IN_HEADER_SIZE..end];
 
-            if let Some(answer) = self.dispatch(&header, data) {
+            if let Some(answer) = self.dispatch(connection, &header, data) {
                 let (error, payload) = match answer {
                     Ok(payload) => (0, payload),
                     Err(errno) => (errno, Vec::new()),
@@ -120,7 +175,12 @@ impl PoolFs {
     }
 
     /// `None` heisst: Auf diese Anfrage gehoert keine Antwort.
-    fn dispatch(&mut self, header: &abi::InHeader, data: &[u8]) -> Option<Answer> {
+    fn dispatch(
+        &mut self,
+        connection: &Connection,
+        header: &abi::InHeader,
+        data: &[u8],
+    ) -> Option<Answer> {
         match header.opcode {
             abi::FUSE_INIT => Some(self.init(data)),
             abi::FUSE_DESTROY => Some(Ok(Vec::new())),
@@ -154,14 +214,14 @@ impl PoolFs {
             abi::FUSE_READDIR => Some(self.readdir(data)),
             abi::FUSE_RELEASEDIR => Some(self.releasedir(data)),
 
-            abi::FUSE_OPEN => Some(self.open(header.nodeid, data)),
+            abi::FUSE_OPEN => Some(self.open(connection, header.nodeid, data)),
             abi::FUSE_READ => Some(self.read(data)),
-            abi::FUSE_RELEASE => Some(self.release(data)),
+            abi::FUSE_RELEASE => Some(self.release(connection, data)),
             abi::FUSE_FLUSH | abi::FUSE_FSYNCDIR => Some(Ok(Vec::new())),
             abi::FUSE_FSYNC => Some(self.fsync(data)),
 
             // --- Schreiben ---
-            abi::FUSE_CREATE => Some(self.create(header, data)),
+            abi::FUSE_CREATE => Some(self.create(connection, header, data)),
             abi::FUSE_MKDIR => Some(self.mkdir(header, data)),
             abi::FUSE_MKNOD => Some(self.mknod(header, data)),
             abi::FUSE_SYMLINK => Some(self.symlink(header, data)),
@@ -195,8 +255,29 @@ impl PoolFs {
         let minor = request.minor.min(abi::FUSE_KERNEL_MINOR_VERSION);
         // Nur anmelden, was der Kernel angeboten hat: Ein Bit zu setzen, das
         // er nicht kennt, ist eine Zusage an niemanden.
-        let flags = request.flags & (abi::FUSE_ASYNC_READ | abi::FUSE_BIG_WRITES);
-        Ok(abi::init_out(minor, request.max_readahead, flags, MAX_WRITE).into_bytes())
+        let mut flags = request.flags & (abi::FUSE_ASYNC_READ | abi::FUSE_BIG_WRITES);
+        let flags2 = if self.allow_passthrough {
+            request.flags2 & abi::FUSE_PASSTHROUGH_FLAG2
+        } else {
+            0
+        };
+        if flags2 != 0 {
+            flags |= request.flags & abi::FUSE_INIT_EXT;
+        }
+
+        // Der Passthrough braucht **dreierlei**: das Bit vom Kernel, das
+        // zurueckgegebene `FUSE_INIT_EXT`, ohne das er `flags2` gar nicht
+        // ansieht, und eine ausgehandelte Version, die `max_stack_depth`
+        // kennt. Fehlt eines, laeuft alles wie bisher durch diesen Prozess —
+        // langsamer, aber richtig.
+        self.passthrough = flags2 & abi::FUSE_PASSTHROUGH_FLAG2 != 0
+            && flags & abi::FUSE_INIT_EXT != 0
+            && minor >= abi::FUSE_KERNEL_MINOR_VERSION;
+        self.counters
+            .passthrough_available
+            .store(self.passthrough, Ordering::Relaxed);
+
+        Ok(abi::init_out(minor, request.max_readahead, flags, flags2, MAX_WRITE).into_bytes())
     }
 
     // --- Nachschlagen -----------------------------------------------------
@@ -284,7 +365,7 @@ impl PoolFs {
 
         let fh = self.take_fh();
         self.dirs.insert(fh, entries);
-        Ok(abi::open_out(fh, 0).into_bytes())
+        Ok(abi::open_out(fh, 0, 0).into_bytes())
     }
 
     fn readdir(&mut self, data: &[u8]) -> Answer {
@@ -329,7 +410,7 @@ impl PoolFs {
 
     // --- Dateien ----------------------------------------------------------
 
-    fn open(&mut self, nodeid: u64, data: &[u8]) -> Answer {
+    fn open(&mut self, connection: &Connection, nodeid: u64, data: &[u8]) -> Answer {
         let Some(request) = abi::OpenIn::decode(data) else {
             return Err(-libc::EINVAL);
         };
@@ -347,12 +428,17 @@ impl PoolFs {
         let file = backing::open(&root, &path, request.flags as i32)
             .map_err(|error| backing::errno_of(&error))?;
 
+        let (open_flags, backing_id) = self.hand_over(connection, &file);
         let fh = self.take_fh();
         self.files.insert(fh, file);
-        Ok(abi::open_out(fh, 0).into_bytes())
+        if backing_id != 0 {
+            self.backing.insert(fh, backing_id);
+        }
+        Ok(abi::open_out(fh, open_flags, backing_id).into_bytes())
     }
 
     fn read(&mut self, data: &[u8]) -> Answer {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
         let Some(request) = abi::ReadIn::decode(data) else {
             return Err(-libc::EINVAL);
         };
@@ -376,18 +462,28 @@ impl PoolFs {
         Ok(buffer)
     }
 
-    fn release(&mut self, data: &[u8]) -> Answer {
+    fn release(&mut self, connection: &Connection, data: &[u8]) -> Answer {
         if data.len() >= 8 {
             let mut raw = [0u8; 8];
             raw.copy_from_slice(&data[..8]);
-            self.files.remove(&u64::from_ne_bytes(raw));
+            let fh = u64::from_ne_bytes(raw);
+            self.files.remove(&fh);
+            // **Zu jedem `backing_open` gehoert ein `backing_close`.** Sonst
+            // haelt der Kernel einen Verweis auf die Datei, bis der Pool
+            // ausgehaengt wird — bei einem Dienst, der Monate laeuft, ist das
+            // ein Leck, das erst beim Aufraeumen auffaellt.
+            if let Some(id) = self.backing.remove(&fh) {
+                if crate::fuse::connection::backing_close(connection, id) {
+                    self.counters.backing_closes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
         Ok(Vec::new())
     }
 
     // --- Anlegen ----------------------------------------------------------
 
-    fn create(&mut self, header: &abi::InHeader, data: &[u8]) -> Answer {
+    fn create(&mut self, connection: &Connection, header: &abi::InHeader, data: &[u8]) -> Answer {
         let Some(request) = abi::CreateIn::decode(data) else {
             return Err(-libc::EINVAL);
         };
@@ -403,7 +499,7 @@ impl PoolFs {
             }
             let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
             let file = backing::open(&root, &path, flags).map_err(|e| backing::errno_of(&e))?;
-            return self.opened(&path, file);
+            return self.opened(connection, &path, file);
         }
 
         let branch = self.place_at(&path, 0)?;
@@ -412,7 +508,7 @@ impl PoolFs {
         let file = backing::create_file(&root, &path, request.mode, flags)
             .map_err(|e| backing::errno_of(&e))?;
         self.give_to_caller(&root, &path, header)?;
-        self.opened(&path, file)
+        self.opened(connection, &path, file)
     }
 
     fn mkdir(&mut self, header: &abi::InHeader, data: &[u8]) -> Answer {
@@ -513,6 +609,7 @@ impl PoolFs {
     // --- Schreiben --------------------------------------------------------
 
     fn write(&mut self, data: &[u8]) -> Answer {
+        self.counters.writes.fetch_add(1, Ordering::Relaxed);
         let Some(request) = abi::WriteIn::decode(data) else {
             return Err(-libc::EINVAL);
         };
@@ -890,15 +987,47 @@ impl PoolFs {
     }
 
     /// Die Antwort auf ein `CREATE`: Eintrag und offene Datei in einem.
-    fn opened(&mut self, path: &str, file: File) -> Answer {
+    fn opened(&mut self, connection: &Connection, path: &str, file: File) -> Answer {
         let metadata = file
             .metadata()
             .map_err(|error| -error.raw_os_error().unwrap_or(libc::EIO))?;
         let nodeid = self.inodes.lookup(path);
         let attr = backing::attr_of(&metadata, nodeid);
+        let (open_flags, backing_id) = self.hand_over(connection, &file);
         let fh = self.take_fh();
         self.files.insert(fh, file);
-        Ok(abi::create_out(nodeid, &attr, CACHE_SECONDS, fh).into_bytes())
+        if backing_id != 0 {
+            self.backing.insert(fh, backing_id);
+        }
+        Ok(abi::create_out(nodeid, &attr, CACHE_SECONDS, fh, open_flags, backing_id).into_bytes())
+    }
+
+    /// Uebergibt die Datei an den Kernel, wenn er sie annimmt.
+    ///
+    /// Danach bedient er Lesen und Schreiben unmittelbar aus ihr, und dieser
+    /// Prozess sieht sie nicht mehr. Nimmt er sie nicht — zu alter Kernel, zu
+    /// viele hinterlegte Dateien —, laeuft alles wie bisher: langsamer, aber
+    /// richtig. Deshalb ist der Rueckfall kein Fehlerpfad, sondern der
+    /// zweite gewoehnliche Ausgang.
+    fn hand_over(&self, connection: &Connection, file: &File) -> (u32, i32) {
+        use std::os::fd::AsRawFd;
+
+        if !self.passthrough {
+            self.counters.plain_opens.fetch_add(1, Ordering::Relaxed);
+            return (0, 0);
+        }
+        match crate::fuse::connection::backing_open(connection, file.as_raw_fd()) {
+            Some(id) => {
+                self.counters
+                    .passthrough_opens
+                    .fetch_add(1, Ordering::Relaxed);
+                (abi::FOPEN_PASSTHROUGH, id)
+            }
+            None => {
+                self.counters.plain_opens.fetch_add(1, Ordering::Relaxed);
+                (0, 0)
+            }
+        }
     }
 
     /// Welcher Branch diesen Pfad bedient, falls einer.

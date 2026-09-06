@@ -242,3 +242,53 @@ fn last_error(what: &'static str) -> PoolError {
         raw_os_error: error.raw_os_error(),
     }
 }
+
+// --- Passthrough ----------------------------------------------------------
+
+/// Hinterlegt einen Dateideskriptor beim Kernel und liefert seine
+/// `backing_id`.
+///
+/// Danach darf eine Antwort auf `OPEN` mit [`FOPEN_PASSTHROUGH`] auf ihn
+/// zeigen, und der Kernel bedient Lesen und Schreiben unmittelbar aus dieser
+/// Datei — dieser Server sieht sie nicht mehr.
+///
+/// # Warum ein Fehlschlag keiner ist
+///
+/// Auf einem Kernel vor 6.9 gibt es dieses `ioctl` nicht, und auch sonst kann
+/// es scheitern — etwa wenn zu viele Dateien gleichzeitig hinterlegt sind.
+/// Der Aufrufer faellt dann auf den gewoehnlichen Weg zurueck: langsamer,
+/// aber richtig. Deshalb `Option` und kein `Result`; ein Fehler ist hier eine
+/// Auskunft und kein Abbruch.
+pub fn backing_open(connection: &Connection, backing: RawFd) -> Option<i32> {
+    let map = crate::fuse::abi::backing_map(backing).into_bytes();
+    // SAFETY: `map` ist `BACKING_MAP_SIZE` gross, genau die Groesse, die in
+    // der Ioctl-Nummer steht — der Kernel liest nicht darueber hinaus.
+    let id = unsafe {
+        libc::ioctl(
+            connection.fd(),
+            crate::fuse::abi::FUSE_DEV_IOC_BACKING_OPEN as libc::Ioctl,
+            map.as_ptr(),
+        )
+    };
+    (id > 0).then_some(id)
+}
+
+/// Gibt eine `backing_id` wieder frei.
+///
+/// **Muss zu jedem [`backing_open`] kommen.** Der Kernel haelt sonst einen
+/// Verweis auf die Datei, bis der Pool ausgehaengt wird — bei einem Server,
+/// der Monate laeuft, ist das ein Leck, das erst beim Aufraeumen auffaellt.
+/// Der Rueckgabewert sagt, ob der Kernel die `backing_id` kannte. `false`
+/// heisst: Sie war schon zu oder hat nie existiert — ein Buchhaltungsfehler
+/// hier, kein Fehler des Aufrufers.
+pub fn backing_close(connection: &Connection, id: i32) -> bool {
+    // SAFETY: `id` ist ein `u32`, und die Ioctl-Nummer sagt genau vier Bytes.
+    let result = unsafe {
+        libc::ioctl(
+            connection.fd(),
+            crate::fuse::abi::FUSE_DEV_IOC_BACKING_CLOSE as libc::Ioctl,
+            &id as *const i32,
+        )
+    };
+    result == 0
+}

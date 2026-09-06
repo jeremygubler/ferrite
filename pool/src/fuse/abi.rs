@@ -54,16 +54,27 @@ pub const FUSE_KERNEL_VERSION: u32 = 7;
 
 /// Die Nebenversion, die dieser Server spricht.
 ///
-/// 7.31 und nicht die neueste: Alles darueber sind Erweiterungen, die hier
-/// noch niemand benutzt, und jede angemeldete Erweiterung ist eine Zusage,
-/// die eingeloest werden muss.
-pub const FUSE_KERNEL_MINOR_VERSION: u32 = 31;
+/// 7.39, weil der Kernel den Passthrough erst ab dieser Nebenversion
+/// anbietet: Er liest `max_stack_depth` aus der Antwort auf `INIT` nur, wenn
+/// die ausgehandelte Version hoch genug ist, und ohne dieses Feld gibt es
+/// keinen Passthrough.
+///
+/// Hoeher wird nicht angemeldet. Jede Version bringt Erweiterungen mit, und
+/// eine angemeldete Erweiterung ist eine Zusage, die eingeloest werden muss —
+/// hier wird nur angemeldet, was auch bedient wird.
+pub const FUSE_KERNEL_MINOR_VERSION: u32 = 39;
 
 /// `FUSE_ASYNC_READ`. Ohne dieses Bit serialisiert der Kernel Lesevorgaenge
 /// je Datei.
 pub const FUSE_ASYNC_READ: u32 = 1 << 0;
 /// `FUSE_BIG_WRITES`: Writes duerfen groesser als eine Seite sein.
 pub const FUSE_BIG_WRITES: u32 = 1 << 5;
+/// `FUSE_INIT_EXT`: Ohne dieses Bit sieht der Kernel `flags2` gar nicht an.
+///
+/// Er faltet die oberen 32 Bit nur dann zu den Flags dazu, wenn die Antwort
+/// `FUSE_INIT_EXT` traegt. Fehlt es, bleibt jedes Bit in `flags2` wirkungslos
+/// — und zwar still: Der Mount gelingt, der Passthrough bleibt aus.
+pub const FUSE_INIT_EXT: u32 = 1 << 30;
 /// `FUSE_DO_READDIRPLUS`: der Kernel darf `READDIRPLUS` schicken.
 ///
 /// Wird hier **nicht** angemeldet. `READDIRPLUS` spart ein `LOOKUP` je
@@ -74,6 +85,59 @@ pub const FUSE_DO_READDIRPLUS: u32 = 1 << 13;
 
 /// Kleinster Lesepuffer, den der Kernel akzeptiert (`FUSE_MIN_READ_BUFFER`).
 pub const FUSE_MIN_READ_BUFFER: usize = 8192;
+
+// --- Passthrough ----------------------------------------------------------
+
+/// `FUSE_PASSTHROUGH`, in `fuse.h` als `1ULL << 37`.
+///
+/// Die 64 Bit der Flags sind auf zwei Felder verteilt: `flags` traegt die
+/// unteren 32, `flags2` die oberen. Bit 37 ist damit Bit 5 in `flags2` — wer
+/// das verwechselt, meldet ein Bit an, das etwas anderes bedeutet.
+pub const FUSE_PASSTHROUGH_FLAG2: u32 = 1 << 5;
+
+/// `FOPEN_PASSTHROUGH`: Diese Antwort auf `OPEN` traegt eine `backing_id`.
+///
+/// Danach bedient der Kernel Lesen und Schreiben unmittelbar aus der
+/// hinterlegten Datei — dieser Server sieht sie nicht mehr.
+pub const FOPEN_PASSTHROUGH: u32 = 1 << 7;
+
+/// Wieviele FUSE-Schichten uebereinander liegen duerfen.
+///
+/// Ohne diesen Wert kein Passthrough: Der Kernel lehnt eine hinterlegte Datei
+/// ab, wenn die Tiefe null ist. Eins genuegt — der Pool liegt auf einem
+/// gewoehnlichen Dateisystem und nicht auf einem weiteren FUSE.
+pub const MAX_STACK_DEPTH: u32 = 1;
+
+/// `struct fuse_backing_map`: `int32 fd`, `uint32 flags`, `uint64 padding`.
+pub const BACKING_MAP_SIZE: usize = 16;
+
+const FUSE_DEV_IOC_MAGIC: u32 = 229;
+
+/// `_IOW(type, nr, size)` aus `asm-generic/ioctl.h`.
+///
+/// Von Hand ausgerechnet und gegen die Zahlen aus dem Header geprueft — wie
+/// bei den ublk-Ioctls. Eine falsche Nummer trifft ein anderes `ioctl`
+/// desselben Treibers, und das faellt nicht unbedingt sofort auf.
+const fn iow(kind: u32, number: u32, size: u32) -> u32 {
+    const WRITE: u32 = 1;
+    (WRITE << 30) | (size << 16) | (kind << 8) | number
+}
+
+/// Hinterlegt einen Dateideskriptor und liefert eine `backing_id`.
+pub const FUSE_DEV_IOC_BACKING_OPEN: u32 = iow(FUSE_DEV_IOC_MAGIC, 1, BACKING_MAP_SIZE as u32);
+
+/// Gibt eine `backing_id` wieder frei.
+pub const FUSE_DEV_IOC_BACKING_CLOSE: u32 = iow(FUSE_DEV_IOC_MAGIC, 2, 4);
+
+/// Schreibt `struct fuse_backing_map`.
+pub fn backing_map(fd: i32) -> Writer {
+    let mut out = Writer::with_capacity(BACKING_MAP_SIZE);
+    out.i32(fd)
+        .u32(0) // flags
+        .u64(0); // padding
+    debug_assert_eq!(out.len(), BACKING_MAP_SIZE);
+    out
+}
 
 // --- Groessen -------------------------------------------------------------
 
@@ -95,11 +159,17 @@ pub const CREATE_OUT_SIZE: usize = ENTRY_OUT_SIZE + OPEN_OUT_SIZE;
 /// Der Kernel lehnt eine Antwort ab, die **laenger** ist als seine eigene
 /// `struct fuse_init_out` (`fuse_copy_out_args` gibt dann `-EINVAL`). Kuerzer
 /// darf sie sein — fuer `INIT` ist `out_argvar` gesetzt, der Rest bleibt null.
-/// Diese 32 Bytes reichen bis `map_alignment` und damit fuer 7.31; sie sind
-/// auf jedem Kernel, der ueberhaupt in Frage kommt, kuerzer als dessen
-/// Struktur. Wer hier spaeter `flags2` braucht, hebt die Zahl **und** die
-/// Nebenversion an, nicht nur eines von beidem.
-pub const INIT_OUT_LEN: usize = 32;
+///
+/// Diese 40 Bytes reichen bis einschliesslich `max_stack_depth` und damit fuer
+/// den Passthrough. `sizeof(struct fuse_init_out)` ist seit 7.28 unveraendert
+/// 64 — die Erweiterungen seither haben nur das nachlaufende `unused[]`
+/// verkleinert. 40 ist also auf jedem Kernel, der in Frage kommt, kuerzer als
+/// dessen Struktur.
+///
+/// Wer hier ein weiteres Feld braucht, hebt die Zahl **und** die
+/// Nebenversion an, nicht nur eines von beidem: Der Kernel liest ein Feld nur,
+/// wenn die ausgehandelte Version es kennt.
+pub const INIT_OUT_LEN: usize = 40;
 
 // --- Lesen ----------------------------------------------------------------
 
@@ -141,6 +211,10 @@ pub struct InitIn {
     pub minor: u32,
     pub max_readahead: u32,
     pub flags: u32,
+    /// Die oberen 32 Bit der Flags. Erst ab 7.36 ueberhaupt vorhanden —
+    /// bei einem aelteren Kernel steht hier null, und das ist die richtige
+    /// Antwort: Er bietet nichts an, was dort stuende.
+    pub flags2: u32,
 }
 
 impl InitIn {
@@ -153,6 +227,11 @@ impl InitIn {
             minor: u32_at(bytes, 4),
             max_readahead: u32_at(bytes, 8),
             flags: u32_at(bytes, 12),
+            flags2: if bytes.len() >= 20 {
+                u32_at(bytes, 16)
+            } else {
+                0
+            },
         })
     }
 }
@@ -537,16 +616,30 @@ pub fn attr_out(attr: &Attr, valid: u64) -> Writer {
 }
 
 /// Schreibt `struct fuse_open_out`.
-pub fn open_out(fh: u64, open_flags: u32) -> Writer {
+///
+/// `backing_id` gilt nur zusammen mit [`FOPEN_PASSTHROUGH`]; ohne das Flag
+/// muss sie null sein.
+pub fn open_out(fh: u64, open_flags: u32, backing_id: i32) -> Writer {
+    debug_assert!(
+        backing_id == 0 || open_flags & FOPEN_PASSTHROUGH != 0,
+        "eine backing_id ohne FOPEN_PASSTHROUGH bedeutet dem Kernel nichts"
+    );
     let mut out = Writer::with_capacity(OPEN_OUT_SIZE);
-    out.u64(fh).u32(open_flags).i32(0);
+    out.u64(fh).u32(open_flags).i32(backing_id);
     out
 }
 
 /// Die Antwort auf `FUSE_CREATE`: Eintrag **und** offene Datei in einem.
-pub fn create_out(nodeid: u64, attr: &Attr, valid: u64, fh: u64) -> Writer {
+pub fn create_out(
+    nodeid: u64,
+    attr: &Attr,
+    valid: u64,
+    fh: u64,
+    open_flags: u32,
+    backing_id: i32,
+) -> Writer {
     let mut out = entry_out(nodeid, attr, valid);
-    out.bytes(open_out(fh, 0).as_slice());
+    out.bytes(open_out(fh, open_flags, backing_id).as_slice());
     out
 }
 
@@ -615,7 +708,7 @@ pub fn statfs_out(
 }
 
 /// Schreibt die Antwort auf `FUSE_INIT`, gekuerzt auf [`INIT_OUT_LEN`].
-pub fn init_out(minor: u32, max_readahead: u32, flags: u32, max_write: u32) -> Writer {
+pub fn init_out(minor: u32, max_readahead: u32, flags: u32, flags2: u32, max_write: u32) -> Writer {
     let mut out = Writer::with_capacity(INIT_OUT_LEN);
     out.u32(FUSE_KERNEL_VERSION)
         .u32(minor)
@@ -625,8 +718,10 @@ pub fn init_out(minor: u32, max_readahead: u32, flags: u32, max_write: u32) -> W
         .u16(0) // congestion_threshold
         .u32(max_write)
         .u32(1) // time_gran: Nanosekunden, denn btrfs kann sie
-        .u16(0) // max_pages: 0 heisst „der Kernel entscheidet"
-        .u16(0); // map_alignment
+        .u16(0) // max_pages: 0 heisst, der Kernel entscheidet
+        .u16(0) // map_alignment
+        .u32(flags2)
+        .u32(MAX_STACK_DEPTH);
     debug_assert_eq!(out.len(), INIT_OUT_LEN);
     out
 }
@@ -654,19 +749,40 @@ mod tests {
             ATTR_OUT_SIZE,
             "struct fuse_attr_out"
         );
-        assert_eq!(open_out(0, 0).len(), OPEN_OUT_SIZE, "struct fuse_open_out");
+        assert_eq!(
+            open_out(0, 0, 0).len(),
+            OPEN_OUT_SIZE,
+            "struct fuse_open_out"
+        );
         assert_eq!(
             statfs_out(0, 0, 0, 0, 0, 0, 0, 0).len(),
             KSTATFS_SIZE,
             "struct fuse_kstatfs"
         );
-        assert_eq!(init_out(31, 0, 0, 0).len(), INIT_OUT_LEN);
+        assert_eq!(init_out(39, 0, 0, 0, 0).len(), INIT_OUT_LEN);
         assert_eq!(write_out(0).len(), WRITE_OUT_SIZE, "struct fuse_write_out");
         assert_eq!(
-            create_out(1, &attr, 0, 0).len(),
+            create_out(1, &attr, 0, 0, 0, 0).len(),
             CREATE_OUT_SIZE,
             "fuse_entry_out und fuse_open_out hintereinander"
         );
+    }
+
+    #[test]
+    fn the_passthrough_numbers_match_the_header() {
+        // `FUSE_PASSTHROUGH` ist `1ULL << 37`, und die oberen 32 Bit liegen in
+        // `flags2` — also Bit 5. Eine Verwechslung mit Bit 31 waere still: Der
+        // Kernel meldete das Bit nicht zurueck, der Passthrough bliebe aus,
+        // und alles liefe weiter, nur langsam.
+        assert_eq!(FUSE_PASSTHROUGH_FLAG2, 0x20);
+        assert_eq!(FOPEN_PASSTHROUGH, 0x80);
+        assert_eq!(backing_map(3).len(), BACKING_MAP_SIZE);
+
+        // Von Hand ausgerechnete Ioctl-Nummern, gegen die Zahlen aus dem
+        // Header gehalten: `_IOW(229, 1, struct fuse_backing_map)` und
+        // `_IOW(229, 2, uint32_t)`.
+        assert_eq!(FUSE_DEV_IOC_BACKING_OPEN, 0x4010_E501);
+        assert_eq!(FUSE_DEV_IOC_BACKING_CLOSE, 0x4004_E502);
     }
 
     #[test]

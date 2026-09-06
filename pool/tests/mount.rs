@@ -17,7 +17,7 @@ use std::ffi::CString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use ferrite_pool::fuse::{BranchRoot, Connection, MountOptions, PoolFs};
+use ferrite_pool::fuse::{BranchRoot, Connection, Counters, MountOptions, PoolFs};
 use ferrite_pool::{Allocation, BranchId, SharePolicy, SplitDepth};
 
 /// Ein Arbeitsverzeichnis samt Einhaengepunkt, das sich selbst wegraeumt.
@@ -80,6 +80,7 @@ fn prerequisites() -> Option<()> {
 struct Mounted {
     mountpoint: PathBuf,
     worker: Option<std::thread::JoinHandle<()>>,
+    counters: std::sync::Arc<Counters>,
 }
 
 impl Mounted {
@@ -91,13 +92,35 @@ impl Mounted {
         Self::with_policy(workspace, branches, SharePolicy::default())
     }
 
+    /// Wie [`Mounted::start`], aber ohne Passthrough: Lesen und Schreiben
+    /// laufen dann durch diesen Prozess und nicht am ihm vorbei.
+    fn plain(workspace: &Workspace, branches: Vec<BranchRoot>) -> Self {
+        Self::mount(workspace, branches, SharePolicy::default(), false)
+    }
+
     fn with_policy(workspace: &Workspace, branches: Vec<BranchRoot>, policy: SharePolicy) -> Self {
+        Self::mount(workspace, branches, policy, true)
+    }
+
+    fn mount(
+        workspace: &Workspace,
+        branches: Vec<BranchRoot>,
+        policy: SharePolicy,
+        passthrough: bool,
+    ) -> Self {
         let mountpoint = workspace.mountpoint();
         let connection =
             Connection::mount(&mountpoint, &MountOptions::default()).expect("Pool einhaengen");
 
+        // Der Server zieht in den Thread um, die Zaehler bleiben hier:
+        // sonst gaebe es nach dem Start keinen Weg mehr an sie heran.
+        let mut filesystem = PoolFs::new(branches, policy);
+        if !passthrough {
+            filesystem = filesystem.without_passthrough();
+        }
+        let counters = filesystem.counters();
+
         let worker = std::thread::spawn(move || {
-            let mut filesystem = PoolFs::new(branches, policy);
             if let Err(error) = filesystem.run(&connection) {
                 eprintln!("die Schleife ist gestolpert: {error}");
             }
@@ -106,6 +129,7 @@ impl Mounted {
         Mounted {
             mountpoint,
             worker: Some(worker),
+            counters,
         }
     }
 
@@ -1004,4 +1028,198 @@ fn have(program: &str) -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+
+// --- Passthrough ----------------------------------------------------------
+
+use std::sync::atomic::Ordering;
+
+/// Die Version des laufenden Kernels als `(major, minor)`.
+fn kernel_version() -> (u32, u32) {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut parts = release.trim().split(['.', '-']);
+    let major = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let minor = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    (major, minor)
+}
+
+/// `None` mit Begruendung, wenn der Kernel zu alt fuer den Passthrough ist.
+///
+/// # Warum die Kernelversion und nicht der eigene Zaehler
+///
+/// Ob der Passthrough ausgehandelt wurde, entscheidet genau der Code, den
+/// diese Tests pruefen sollen. Wer daran das Ueberspringen festmacht, baut
+/// einen Test, der bei jedem Fehler still durchwinkt statt rot zu werden —
+/// gemessen: Mit `FUSE_PASSTHROUGH` auf dem falschen Bit blieben alle 27
+/// Tests gruen. Deshalb entscheidet die Umgebung ueber das Ueberspringen und
+/// der Zaehler ueber das Bestehen.
+fn passthrough_or_skip(pool: &Mounted) -> Option<()> {
+    let (major, minor) = kernel_version();
+    if (major, minor) < (6, 9) {
+        eprintln!("uebersprungen: Kernel {major}.{minor} kennt keinen FUSE-Passthrough (ab 6.9)");
+        return None;
+    }
+    // Erst nach der ersten Anfrage steht fest, was `INIT` ergeben hat.
+    let _ = std::fs::read_dir(pool.path(""));
+    assert!(
+        pool.counters.passthrough_available.load(Ordering::Relaxed),
+        "Kernel {major}.{minor} kann den Passthrough — er wurde trotzdem nicht ausgehandelt"
+    );
+    Some(())
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn the_kernel_serves_a_read_without_asking_us() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("passthrough-read");
+    let branches = two_branches(&workspace);
+    write(&workspace.branch_root(0).join("gross.bin"), "");
+    let content: Vec<u8> = (0..(3 << 20)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(workspace.branch_root(0).join("gross.bin"), &content).expect("schreiben");
+
+    let pool = Mounted::start(&workspace, branches);
+    let Some(()) = passthrough_or_skip(&pool) else {
+        return;
+    };
+
+    let read = std::fs::read(pool.path("gross.bin")).expect("lesen");
+
+    assert_eq!(
+        read, content,
+        "der Inhalt muss stimmen, egal wer ihn liefert"
+    );
+    // Der eigentliche Nachweis: Der Inhalt stimmt, obwohl dieser Prozess kein
+    // einziges `READ` gesehen hat. Also hat der Kernel selbst gelesen.
+    assert_eq!(
+        pool.counters.reads.load(Ordering::Relaxed),
+        0,
+        "beim Passthrough darf kein READ hier ankommen"
+    );
+    assert!(
+        pool.counters.passthrough_opens.load(Ordering::Relaxed) >= 1,
+        "mindestens ein OPEN muss eine backing_id getragen haben"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn the_kernel_takes_a_write_without_asking_us() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("passthrough-write");
+    let branches = two_branches(&workspace);
+
+    let pool = Mounted::start(&workspace, branches);
+    let Some(()) = passthrough_or_skip(&pool) else {
+        return;
+    };
+
+    let content: Vec<u8> = (0..(2 << 20)).map(|i| (i % 253) as u8).collect();
+    std::fs::write(pool.path("neu.bin"), &content).expect("schreiben");
+
+    assert_eq!(
+        pool.counters.writes.load(Ordering::Relaxed),
+        0,
+        "beim Passthrough darf kein WRITE hier ankommen"
+    );
+    // Und trotzdem liegt es auf einer Platte, nicht im Nirgendwo.
+    let on_disk: Vec<PathBuf> = (0..2)
+        .map(|slot| workspace.branch_root(slot).join("neu.bin"))
+        .filter(|path| path.exists())
+        .collect();
+    assert_eq!(on_disk.len(), 1, "genau ein Branch traegt die Datei");
+    assert_eq!(
+        std::fs::read(&on_disk[0]).expect("von der Platte lesen"),
+        content
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn without_passthrough_this_process_serves_it_itself() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("kein-passthrough");
+    let branches = two_branches(&workspace);
+    let content: Vec<u8> = (0..(3 << 20)).map(|i| (i % 251) as u8).collect();
+    std::fs::create_dir_all(workspace.branch_root(0)).expect("Branch anlegen");
+    std::fs::write(workspace.branch_root(0).join("gross.bin"), &content).expect("schreiben");
+
+    let pool = Mounted::plain(&workspace, branches);
+    let read = std::fs::read(pool.path("gross.bin")).expect("lesen");
+    std::fs::write(pool.path("neu.bin"), &content).expect("schreiben");
+
+    assert_eq!(read, content);
+    assert_eq!(
+        std::fs::read(workspace.branch_root(0).join("neu.bin"))
+            .or_else(|_| std::fs::read(workspace.branch_root(1).join("neu.bin")))
+            .expect("von der Platte lesen"),
+        content
+    );
+
+    // Die Gegenprobe zu den beiden Tests darueber: Hier *muessen* Anfragen
+    // ankommen. Kaemen auch ohne Passthrough keine, zaehlten die Zaehler
+    // nichts, und die Nullen dort waeren wertlos.
+    assert!(
+        pool.counters.reads.load(Ordering::Relaxed) > 0,
+        "ohne Passthrough muss dieser Prozess die READs sehen"
+    );
+    assert!(
+        pool.counters.writes.load(Ordering::Relaxed) > 0,
+        "ohne Passthrough muss dieser Prozess die WRITEs sehen"
+    );
+    assert_eq!(
+        pool.counters.passthrough_opens.load(Ordering::Relaxed),
+        0,
+        "abgeschaltet heisst abgeschaltet"
+    );
+    assert!(pool.counters.plain_opens.load(Ordering::Relaxed) >= 2);
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn every_handed_over_file_is_taken_back() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("passthrough-leck");
+    let branches = two_branches(&workspace);
+    for index in 0..8 {
+        write(
+            &workspace.branch_root(0).join(format!("datei-{index}")),
+            "Inhalt",
+        );
+    }
+
+    let pool = Mounted::start(&workspace, branches);
+    let Some(()) = passthrough_or_skip(&pool) else {
+        return;
+    };
+
+    for index in 0..8 {
+        assert_eq!(
+            std::fs::read_to_string(pool.path(&format!("datei-{index}"))).expect("lesen"),
+            "Inhalt"
+        );
+    }
+
+    let opens = pool.counters.passthrough_opens.load(Ordering::Relaxed);
+    assert_eq!(opens, 8, "acht Dateien, acht hinterlegte Deskriptoren");
+
+    // `RELEASE` kommt erst, wenn der Kernel die letzte Referenz fallen laesst,
+    // und das ist nicht der Rueckkehrpunkt von `read_to_string`. Deshalb
+    // warten statt sofort messen — mit Frist, damit ein Ausbleiben rot wird
+    // und nicht haengt.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pool.counters.backing_closes.load(Ordering::Relaxed) < opens
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // Der Kernel zaehlt hier mit: `backing_closes` steigt nur, wenn das
+    // `ioctl` die `backing_id` wirklich kannte. Eine erfundene oder doppelt
+    // geschlossene zaehlt nicht mit.
+    assert_eq!(
+        pool.counters.backing_closes.load(Ordering::Relaxed),
+        opens,
+        "jede hinterlegte Datei muss wieder freigegeben werden"
+    );
 }

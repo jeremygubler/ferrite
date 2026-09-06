@@ -145,7 +145,7 @@ Entwickler nie findet.
    scheinbar wiederauferstandenen Dateien, die man aus Unraid kennt.
    Der Pool ist **eingehängt und beschreibbar, und das läuft in CI**:
    `/dev/fuse` und `mount(2)` von Hand, ohne libfuse und ohne `fusermount3`,
-   weil der spätere Passthrough den Datenpfad aus diesem Prozess herausnehmen
+   weil der Passthrough den Datenpfad aus diesem Prozess herausnehmen
    muss und eine Bindung, die ihn selbst in der Hand hält, ihn nicht abgeben
    kann. Auflisten, lesen, schreiben, anlegen, löschen, umbenennen, Rechte und
    Zeitstempel — geprüft über `std::fs` und damit über dieselben Systemaufrufe,
@@ -162,8 +162,14 @@ Entwickler nie findet.
    wer sie durchreicht, zeigt zwei verschiedene Dateien mit derselben Nummer —
    `tar` und `rsync` halten sie dann für Hardlinks und speichern die zweite als
    Verweis auf die erste. Ferrite vergibt eigene, poolweit eindeutige Nummern.
-   Offen bleibt der Passthrough — bis dahin geht jedes Byte durch den
-   Userspace; richtig ist das Ergebnis auch so, nur langsamer. Ebenso offen:
+   Und der **Passthrough greift**: Auf einem Kernel ab 6.9 bekommt der Kernel
+   beim Öffnen den Dateideskriptor der Platte hinterlegt und bedient Lesen und
+   Schreiben danach selbst — dieser Prozess sieht kein einziges Byte mehr.
+   Genau daran hängt der Nachweis: Der Test liest drei Megabyte durch den Pool,
+   vergleicht sie byteweise und besteht nur, wenn der Server dabei **null**
+   READ-Anfragen gezählt hat. Auf einem älteren Kernel fällt alles auf den
+   gewöhnlichen Weg zurück — langsamer, aber richtig —, und der Test sagt,
+   dass er übersprungen hat, statt still grün zu sein. Offen bleiben
    erweiterte Attribute und Sperren. Eine ACL, die nur auf einer von mehreren
    Platten eines Verzeichnisses liegt, gilt je nachdem, welche gerade bedient —
    das gehört entschieden, bevor es gebaut wird.
@@ -242,7 +248,7 @@ von Anfang an mitläuft.
 | `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion (ein **und zwei** ausgefallene Slots), Rebuild, Recovery und Reparatur mit Gegenprobe — 160 Tests grün (150 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
-| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
+| `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 28 Tests an einem echt eingehängten Pool, in CI, davon 4 für den Passthrough — inklusive der Gegenprobe, dass ohne ihn sehr wohl Anfragen ankommen. xattrs und Sperren offen |
 | `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. systemd-Units in `packaging/`. Daemon und Web-UI offen |
 
 ```
