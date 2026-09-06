@@ -44,6 +44,18 @@ jeweiligen Data-Member. Ferrite liefert die Redundanz, aus der ein als korrupt
 gemeldeter Block rekonstruiert wird. Zwei konkurrierende Prüfsummenschichten
 wären nicht sicherer, nur teurer und im Fehlerfall mehrdeutig.
 
+**7a. Eine Reparatur wird gegengeprüft, bevor sie schreibt.** Bei Bit-Rot ist
+nicht bekannt, *welche* Quelle gelogen hat. Wer nur aus P rekonstruiert und das
+Ergebnis zurückschreibt, macht aus einer angefressenen Parität einen
+angefressenen Datenblock — aus einem behebbaren Fehler echten Datenverlust.
+Deshalb wird aus P **und** aus Q gerechnet, und beide Wege müssen dasselbe
+ergeben. Tun sie es nicht, wird gemeldet und nicht geschrieben.
+
+**7b. Eine Reparatur fasst die Parität nicht an.** Sie ist hier Quelle und
+nicht Mitschrift. Über den gewöhnlichen Schreibpfad zu gehen hieße
+`P_neu = P_alt ^ D_rostig ^ D_gut` — und faltete den Rost in die letzte gute
+Kopie ein.
+
 **8. Reine Crates bleiben rein.** Regel 2 gilt sinngemäss auch für `parity/`:
 kein I/O, keine Konfiguration, keine Uhrzeit, kein Zufall aus der Umgebung.
 Zufall und Zeit kommen als Parameter herein.
@@ -84,7 +96,8 @@ engine/   Planung von Schreibpfad und Rebuild — kein I/O            [fertig]
           Schreibpfad mit Log und Paritaet (Write-Through)          [fertig]
           Rekonstruktion und Rebuild auf Platte                     [fertig]
           Write-Back (braucht ehrliches Flush, Abschnitt 5.3)       [offen]
-broker/   btrfs-EIO abfangen, rekonstruieren, zurückschreiben       [offen]
+broker/   btrfs-Scrub-Befund lesen, rekonstruieren, zurückschreiben [fertig]
+          Lesefehler zur Laufzeit — braucht den Chunk-Baum           [offen]
 pool/     FUSE-Namespace mit Passthrough, Share-Policies            [offen]
 ctl/      gRPC-Daemon und CLI                                       [offen]
 ```

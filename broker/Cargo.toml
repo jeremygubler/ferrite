@@ -1,0 +1,17 @@
+[package]
+name = "ferrite-broker"
+description = "Repair-Broker: Meldungen von btrfs abfangen, aus der Redundanz rekonstruieren, zurueckschreiben."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ferrite-engine = { path = "../engine" }
+
+# Nur fuer die Kernel-Meldungen: `/dev/kmsg` will nicht-blockierend geoeffnet
+# werden, und `O_NONBLOCK` steht in `std` nirgends. Der Rest dieses Crates —
+# Parser, Zusammenfassung, Reparaturschleife — kommt ohne aus und laeuft
+# ueberall.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

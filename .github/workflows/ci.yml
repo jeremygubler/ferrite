@@ -191,6 +191,15 @@ jobs:
       - name: ublk-Tests
         run: sudo -E $(cargo test -p ferrite-engine --test ublk --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*ublk[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
 
+      # Meilenstein 4 am Stueck: echtes btrfs auf einem Ferrite-Geraet, echter
+      # Rost auf der Platte, echter Scrub, echte Reparatur. Der Test liest den
+      # Kernel-Ringpuffer und haengt damit an der Formulierung, die dieser
+      # Kernel waehlt — genau deshalb laeuft er hier und nicht nur lokal.
+      - name: Selbstheilung mit btrfs
+        run: |
+          cargo test -p ferrite-harness --test btrfs_repair --no-run
+          sudo -E $(cargo test -p ferrite-harness --test btrfs_repair --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*btrfs_repair[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
+
       # Ein abgebrochener Test kann ein Geraet zurueckgelassen haben. Auf einem
       # Runner ist das folgenlos, aber es soll im Log stehen.
       - name: Reste melden

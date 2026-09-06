@@ -12,7 +12,9 @@ Bit-Rot, atomare Updates. Läuft bare metal wie virtualisiert.
 > ein Blockgerät bereit, btrfs läuft darauf, und jeder Write geht durch Log und
 > Parität. Der Absturz an jedem einzelnen I/O-Punkt des Schreibpfads läuft seit
 > Meilenstein 3 in CI, ebenso Lesefehler, verschluckte Writes und Bit-Rot über
-> `dm-dust` und `dm-flakey`. **Trotzdem: Lege nichts darauf ab, wovon du nur
+> `dm-dust` und `dm-flakey`. Seit Meilenstein 4 findet ein btrfs-Scrub den
+> Rost und Ferrite holt ihn aus der Parität zurück — in CI, mit echtem btrfs
+> auf einem echten Ferrite-Blockgerät. **Trotzdem: Lege nichts darauf ab, wovon du nur
 > eine Kopie hast.** Was fehlt, ist Betrieb auf echter Hardware über längere
 > Zeit — und ein Speichersystem, das noch niemand im Alltag benutzt hat, hat
 > seine unangenehmen Überraschungen noch vor sich.
@@ -35,7 +37,9 @@ Vier Dinge daran sind es nicht:
 **Selbstheilung ohne Mirror.** Jeder Data-Member trägt btrfs mit Prüfsummen.
 Meldet btrfs einen korrupten Block, rekonstruiert der Repair-Broker ihn aus der
 Parität und schreibt ihn zurück. Prüfsummen ohne Redundanz können nur melden,
-Parität ohne Prüfsummen merkt nichts — erst die Kopplung repariert.
+Parität ohne Prüfsummen merkt nichts — erst die Kopplung repariert. Das steht
+seit Meilenstein 4 nicht mehr nur hier, sondern läuft bei jedem Push einmal
+durch: echtes btrfs, echter Rost, echter Scrub, echte Reparatur.
 
 ## Was Ferrite selbst baut
 
@@ -95,7 +99,23 @@ Entwickler nie findet.
    Slot zählt als Nullbytes, und `recover` meldet die betroffenen Bereiche. Das
    Array bleibt offen, die übrigen Members voll nutzbar. Gemessen an allen 80
    Abbruchpunkten: 64 mit Recovery, 64 davon mit gemeldetem Verlust.
-4. **Repair-Broker.** btrfs-EIO abfangen, rekonstruieren, zurückschreiben.
+4. **Repair-Broker.** Der Teil, der Selbstheilung erst zu einer macht, und er
+   **läuft in CI**: echtes btrfs auf einem Ferrite-Blockgerät, Bytes auf der
+   Platte gekippt, echter `btrfs scrub` — der findet den Fehler und kann ihn
+   nicht selbst beheben —, Befund aus dem Kernel-Ringpuffer gelesen, Bereich
+   rekonstruiert, zurückgeschrieben, Datei wieder lesbar, zweiter Scrub sauber.
+   Zwei Dinge daran sind nicht selbstverständlich:
+   **Die Rekonstruktion wird gegengeprüft.** Bei Bit-Rot weiß niemand vorab,
+   welche Quelle gelogen hat. Gerechnet wird deshalb aus P *und* aus Q; nur wenn
+   beide Wege dasselbe ergeben, wird geschrieben. Ist es die Parität, die
+   angefressen ist, meldet Ferrite das — und schreibt nichts. Wer hier nur aus P
+   rekonstruierte, machte aus einem behebbaren Fehler echten Datenverlust.
+   **Die Parität bleibt unberührt.** Sie ist die Quelle, nicht die Mitschrift;
+   über den Schreibpfad zu gehen faltete den Rost in sie ein.
+   Offen bleibt der Lesefehler zur Laufzeit: Er nennt nur den Offset in der
+   Datei, nicht den auf der Platte, und ihn umzurechnen heißt, den Chunk-Baum von
+   btrfs zu lesen. Bis dahin ist der Scrub der Weg — und der ist ohnehin das,
+   was ein NAS regelmäßig laufen lässt.
 5. **Pool-Namespace.** FUSE-Passthrough, Share-Policies.
 6. **Control plane und UI.**
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
@@ -114,9 +134,9 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion, Rebuild und Recovery — 139 Tests grün (129 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
-| `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 4 Tests in CI. Dazu 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`), ebenfalls in CI, mit Root |
-| `broker/` | offen |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion, Rebuild, Recovery und Reparatur mit Gegenprobe — 153 Tests grün (143 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
+| `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
+| `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | offen |
 | `ctl/` | offen |
 

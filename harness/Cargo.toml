@@ -12,3 +12,8 @@ publish = false
 [dependencies]
 ferrite-engine = { path = "../engine", features = ["crash-points"] }
 ferrite-format = { path = "../format" }
+
+[dev-dependencies]
+# Der Broker wird hier gegen ein echtes Array gefuehrt, nicht gegen eine
+# Attrappe. Nur zum Testen — das Harness selbst repariert nichts.
+ferrite-broker = { path = "../broker" }
