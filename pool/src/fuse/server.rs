@@ -80,6 +80,8 @@ struct Listed {
 pub struct Counters {
     /// Wurde der Passthrough beim `INIT` ausgehandelt?
     pub passthrough_available: AtomicBool,
+    /// Wurden POSIX-ACLs beim `INIT` ausgehandelt?
+    pub posix_acl_available: AtomicBool,
     /// Dateien, die mit hinterlegtem Deskriptor geoeffnet wurden.
     pub passthrough_opens: AtomicU64,
     /// Dateien, bei denen das nicht ging — der gewoehnliche Weg.
@@ -117,6 +119,16 @@ pub struct PoolFs {
     cursor: Option<BranchId>,
     /// Hat der Kernel den Passthrough angeboten — und wollen wir ihn?
     passthrough: bool,
+    /// Wurde `FUSE_POSIX_ACL` ausgehandelt?
+    ///
+    /// Danach wendet der Kernel die `umask` beim Anlegen nicht mehr an — das
+    /// ist ab dann Sache dieses Servers.
+    posix_acl: bool,
+    /// Darf ueberhaupt verhandelt werden?
+    ///
+    /// Nur fuer Tests aus: Ohne das Bit weist der Kernel ACL-Attribute selbst
+    /// zurueck, und der Umask-Pfad hier laeuft nie. Beides gehoert geprueft.
+    allow_posix_acl: bool,
     /// Darf ueberhaupt verhandelt werden?
     ///
     /// Nur fuer Tests aus: Greift der Passthrough, sieht dieser Prozess kein
@@ -140,6 +152,8 @@ impl PoolFs {
             cursor: None,
             passthrough: false,
             allow_passthrough: true,
+            posix_acl: false,
+            allow_posix_acl: true,
             counters: Arc::new(Counters::default()),
         }
     }
@@ -147,6 +161,12 @@ impl PoolFs {
     /// Schaltet den Passthrough ab, bevor eingehaengt wird.
     pub fn without_passthrough(mut self) -> Self {
         self.allow_passthrough = false;
+        self
+    }
+
+    /// Schaltet die POSIX-ACLs ab, bevor eingehaengt wird.
+    pub fn without_posix_acl(mut self) -> Self {
+        self.allow_posix_acl = false;
         self
     }
 
@@ -270,6 +290,16 @@ impl PoolFs {
         // Nur anmelden, was der Kernel angeboten hat: Ein Bit zu setzen, das
         // er nicht kennt, ist eine Zusage an niemanden.
         let mut flags = request.flags & (abi::FUSE_ASYNC_READ | abi::FUSE_BIG_WRITES);
+        // Beide zusammen oder keines: ACLs anzumelden, ohne die `umask` zu
+        // uebernehmen, hiesse, dass der Kernel sie weiter abzieht und jede
+        // Default-ACL gegen sie verliert.
+        if self.allow_posix_acl {
+            flags |= request.flags & (abi::FUSE_POSIX_ACL | abi::FUSE_DONT_MASK);
+        }
+        self.posix_acl = flags & abi::FUSE_POSIX_ACL != 0 && flags & abi::FUSE_DONT_MASK != 0;
+        self.counters
+            .posix_acl_available
+            .store(self.posix_acl, Ordering::Relaxed);
         let flags2 = if self.allow_passthrough {
             request.flags2 & abi::FUSE_PASSTHROUGH_FLAG2
         } else {
@@ -519,8 +549,9 @@ impl PoolFs {
         let branch = self.place_at(&path, 0)?;
         self.ensure_parents(branch, &path)?;
         let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
-        let file = backing::create_file(&root, &path, request.mode, flags)
-            .map_err(|e| backing::errno_of(&e))?;
+        let mode = self.creation_mode(&root, header.nodeid, request.mode, request.umask);
+        let file =
+            backing::create_file(&root, &path, mode, flags).map_err(|e| backing::errno_of(&e))?;
         self.give_to_caller(&root, &path, header)?;
         self.opened(connection, &path, file)
     }
@@ -541,7 +572,8 @@ impl PoolFs {
         let branch = self.place_at(&path, 0)?;
         self.ensure_parents(branch, &path)?;
         let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
-        backing::make_dir(&root, &path, request.mode).map_err(|e| backing::errno_of(&e))?;
+        let mode = self.creation_mode(&root, header.nodeid, request.mode, request.umask);
+        backing::make_dir(&root, &path, mode).map_err(|e| backing::errno_of(&e))?;
         self.give_to_caller(&root, &path, header)?;
         self.entry_reply(&path)
     }
@@ -568,7 +600,8 @@ impl PoolFs {
         let branch = self.place_at(&path, 0)?;
         self.ensure_parents(branch, &path)?;
         let root = self.branch(branch).ok_or(-libc::ENOENT)?.clone();
-        backing::make_node(&root, &path, request.mode).map_err(|e| backing::errno_of(&e))?;
+        let mode = self.creation_mode(&root, header.nodeid, request.mode, request.umask);
+        backing::make_node(&root, &path, mode).map_err(|e| backing::errno_of(&e))?;
         self.give_to_caller(&root, &path, header)?;
         self.entry_reply(&path)
     }
@@ -954,6 +987,31 @@ impl PoolFs {
             action(&root, path).map_err(|e| backing::errno_of(&e))?;
         }
         Ok(Vec::new())
+    }
+
+    /// Die Rechte, mit denen ein neues Objekt entsteht.
+    ///
+    /// Ohne `FUSE_POSIX_ACL` hat der Kernel die `umask` schon auf `mode`
+    /// angewandt — dann bleibt sie, wie sie ist. Mit dem Bit liegt es hier,
+    /// und dann gilt POSIX.1e: Traegt das Elternverzeichnis eine Default-ACL,
+    /// vergibt **sie** die Rechte und die `umask` zieht nichts ab; sonst zieht
+    /// sie ab.
+    ///
+    /// Beides falsch herum ist still. Die Datei entsteht so oder so — nur mit
+    /// anderen Rechten als bestellt, und das faellt erst auf, wenn jemand
+    /// nicht mehr hineinkommt.
+    fn creation_mode(&mut self, root: &BranchRoot, parent: u64, mode: u32, umask: u32) -> u32 {
+        if !self.posix_acl {
+            return mode;
+        }
+        let Ok(parent) = self.path_of(parent) else {
+            return mode & !umask;
+        };
+        if backing::has_default_acl(root, &parent) {
+            mode
+        } else {
+            mode & !umask
+        }
     }
 
     /// Der Branch, der diesen Pfad bedient.

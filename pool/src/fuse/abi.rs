@@ -79,6 +79,24 @@ pub const FUSE_BIG_WRITES: u32 = 1 << 5;
 /// `FUSE_INIT_EXT` traegt. Fehlt es, bleibt jedes Bit in `flags2` wirkungslos
 /// — und zwar still: Der Mount gelingt, der Passthrough bleibt aus.
 pub const FUSE_INIT_EXT: u32 = 1 << 30;
+/// `FUSE_POSIX_ACL`: Der Server kann POSIX-ACLs.
+///
+/// Das Bit tut zweierlei. Der Kernel laesst `system.posix_acl_access` und
+/// `-_default` erst dann ueberhaupt durch — ohne es weist er sie selbst mit
+/// `EOPNOTSUPP` ab, damit nicht zwei Schichten verschiedene Rechte
+/// behaupten. Und er wendet die `umask` beim Anlegen **nicht mehr** an,
+/// sondern schickt sie mit: Ein Verzeichnis mit Default-ACL vergibt die
+/// Rechte, und dann darf die `umask` nichts mehr abziehen.
+pub const FUSE_POSIX_ACL: u32 = 1 << 20;
+/// `FUSE_DONT_MASK`: Der Kernel wendet die `umask` nicht mehr selbst an.
+///
+/// Gehoert zwingend zu [`FUSE_POSIX_ACL`] dazu, auch wenn die Namen es nicht
+/// verraten. `FUSE_POSIX_ACL` allein laesst zwar ACLs durch, aber `fuse_mkdir`
+/// und `fuse_create_open` ziehen die `umask` weiter selbst ab — und dann
+/// verliert jede Default-ACL gegen sie. Gemessen: ohne dieses Bit entstand
+/// eine Datei in einem Verzeichnis mit Default-ACL als `0600` statt mit den
+/// Rechten, die die ACL vergibt.
+pub const FUSE_DONT_MASK: u32 = 1 << 6;
 /// `FUSE_DO_READDIRPLUS`: der Kernel darf `READDIRPLUS` schicken.
 ///
 /// Wird hier **nicht** angemeldet. `READDIRPLUS` spart ein `LOOKUP` je
@@ -311,6 +329,7 @@ pub fn batch_forget(bytes: &[u8]) -> Vec<(u64, u64)> {
 pub struct CreateIn {
     pub flags: u32,
     pub mode: u32,
+    pub umask: u32,
 }
 
 impl CreateIn {
@@ -320,12 +339,14 @@ impl CreateIn {
         if bytes.len() < Self::SIZE {
             return None;
         }
-        // `umask` bei Offset 8 wird nicht gebraucht: Ohne `FUSE_DONT_MASK`
-        // hat der Kernel sie schon auf `mode` angewandt. Sie hier noch einmal
-        // anzuwenden zoege jede neue Datei ein zweites Mal ab.
+        // Die `umask` steht immer da, angewandt ist sie aber nur, solange
+        // `FUSE_POSIX_ACL` nicht ausgehandelt wurde. Danach ist sie Aufgabe
+        // des Servers — wer sie in beiden Faellen anwendet, zieht jede neue
+        // Datei ein zweites Mal ab.
         Some(CreateIn {
             flags: u32_at(bytes, 0),
             mode: u32_at(bytes, 4),
+            umask: u32_at(bytes, 8),
         })
     }
 }
@@ -334,6 +355,7 @@ impl CreateIn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MkdirIn {
     pub mode: u32,
+    pub umask: u32,
 }
 
 impl MkdirIn {
@@ -342,6 +364,7 @@ impl MkdirIn {
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         (bytes.len() >= Self::SIZE).then(|| MkdirIn {
             mode: u32_at(bytes, 0),
+            umask: u32_at(bytes, 4),
         })
     }
 }
@@ -351,6 +374,7 @@ impl MkdirIn {
 pub struct MknodIn {
     pub mode: u32,
     pub rdev: u32,
+    pub umask: u32,
 }
 
 impl MknodIn {
@@ -360,6 +384,7 @@ impl MknodIn {
         (bytes.len() >= Self::SIZE).then(|| MknodIn {
             mode: u32_at(bytes, 0),
             rdev: u32_at(bytes, 4),
+            umask: u32_at(bytes, 8),
         })
     }
 }

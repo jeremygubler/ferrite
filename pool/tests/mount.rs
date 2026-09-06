@@ -96,11 +96,16 @@ impl Mounted {
     /// Wie [`Mounted::start`], aber ohne Passthrough: Lesen und Schreiben
     /// laufen dann durch diesen Prozess und nicht am ihm vorbei.
     fn plain(workspace: &Workspace, branches: Vec<BranchRoot>) -> Self {
-        Self::mount(workspace, branches, SharePolicy::default(), false)
+        Self::mount(workspace, branches, SharePolicy::default(), false, true)
+    }
+
+    /// Wie [`Mounted::start`], aber ohne ausgehandelte POSIX-ACLs.
+    fn without_acls(workspace: &Workspace, branches: Vec<BranchRoot>) -> Self {
+        Self::mount(workspace, branches, SharePolicy::default(), true, false)
     }
 
     fn with_policy(workspace: &Workspace, branches: Vec<BranchRoot>, policy: SharePolicy) -> Self {
-        Self::mount(workspace, branches, policy, true)
+        Self::mount(workspace, branches, policy, true, true)
     }
 
     fn mount(
@@ -108,6 +113,7 @@ impl Mounted {
         branches: Vec<BranchRoot>,
         policy: SharePolicy,
         passthrough: bool,
+        posix_acl: bool,
     ) -> Self {
         let mountpoint = workspace.mountpoint();
         let connection =
@@ -118,6 +124,9 @@ impl Mounted {
         let mut filesystem = PoolFs::new(branches, policy);
         if !passthrough {
             filesystem = filesystem.without_passthrough();
+        }
+        if !posix_acl {
+            filesystem = filesystem.without_posix_acl();
         }
         let counters = filesystem.counters();
 
@@ -1491,5 +1500,287 @@ fn a_buffer_that_is_too_small_is_erange_and_not_a_half_value() {
     assert_eq!(
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ERANGE)
+    );
+}
+
+// --- POSIX-ACLs -----------------------------------------------------------
+//
+// ACLs sind der Grund, warum ein NAS ueberhaupt erweiterte Attribute braucht:
+// Samba legt seine Rechte dort ab. Sie laufen durch dieselben Handler wie
+// jedes andere Attribut — was hier zusaetzlich geprueft wird, ist die zweite
+// Haelfte von `FUSE_POSIX_ACL`: Ab diesem Bit wendet der Kernel die `umask`
+// beim Anlegen nicht mehr an, und das muss dieser Server uebernehmen.
+
+/// Fuehrt `setfacl`/`getfacl` aus und gibt die Standardausgabe zurueck.
+fn acl_tool(program: &str, args: &[&str], path: &Path) -> std::io::Result<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .arg(path)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "{program} {args:?} {path:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `None` mit Begruendung, wenn die ACL-Werkzeuge fehlen oder das
+/// Dateisystem unter den Branches keine ACLs kann.
+fn acls_or_skip(workspace: &Workspace) -> Option<()> {
+    if !have("setfacl") || !have("getfacl") {
+        eprintln!("uebersprungen: setfacl/getfacl fehlen — Paket `acl` nicht installiert");
+        return None;
+    }
+    std::fs::create_dir_all(workspace.branch_root(0)).expect("Branch anlegen");
+    let probe = workspace.branch_root(0).join(".probe-acl");
+    std::fs::create_dir_all(&probe).expect("Probe anlegen");
+    let works = acl_tool("setfacl", &["-m", "u:12345:rwx"], &probe).is_ok();
+    let _ = std::fs::remove_dir_all(&probe);
+    if !works {
+        eprintln!("uebersprungen: das Dateisystem unter den Branches kann keine POSIX-ACLs");
+        return None;
+    }
+    Some(())
+}
+
+/// Legt eine Datei in einem **Kindprozess** mit gesetzter `umask` an.
+///
+/// # Warum nicht einfach `libc::umask` im Test
+///
+/// Der Server laeuft in einem Thread desselben Prozesses und teilt sich die
+/// `umask` mit dem Test. Setzte der Test sie, zoege das Dateisystem unter dem
+/// Branch sie beim Anlegen selbst ab — und der Test bliebe gruen, auch wenn
+/// dieser Server sie gar nicht anwendet. Gemessen: Mit der `umask` im
+/// Testprozess blieb die Sabotage "nie abziehen" unentdeckt.
+///
+/// Im Kindprozess ist sie dagegen genau das, was der Kernel in der Anfrage
+/// mitschickt — und sonst nichts.
+fn create_with_umask(path: &Path, umask: &str) {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("umask {umask}; : > \"$1\""))
+        .arg("sh")
+        .arg(path)
+        .status()
+        .expect("sh starten");
+    assert!(status.success(), "Datei mit umask {umask} anlegen");
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn an_acl_set_through_the_pool_reaches_every_branch() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("acl-alle");
+    let Some(()) = acls_or_skip(&workspace) else {
+        return;
+    };
+    let branches = two_branches(&workspace);
+    // `Filme` soll auf beiden Branches liegen.
+    write(
+        &workspace.branch_root(1).join("Filme/drei.mkv"),
+        "auch hier",
+    );
+    let pool = Mounted::start(&workspace, branches);
+    // Erst nach der ersten Anfrage steht fest, was `INIT` ergeben hat.
+    let _ = std::fs::read_dir(pool.path(""));
+    assert!(
+        pool.counters.posix_acl_available.load(Ordering::Relaxed),
+        "POSIX-ACLs wurden nicht ausgehandelt"
+    );
+    acl_tool("setfacl", &["-m", "u:12345:rwx"], &pool.path("Filme")).expect("ACL setzen");
+
+    for slot in 0..2 {
+        let text = acl_tool(
+            "getfacl",
+            &["-c"],
+            &workspace.branch_root(slot).join("Filme"),
+        )
+        .expect("ACL lesen");
+        assert!(
+            text.contains("user:12345:rwx"),
+            "Branch {slot} traegt die ACL nicht:\n{text}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn a_default_acl_wins_over_the_umask() {
+    // Der Kern von `FUSE_POSIX_ACL`: Traegt das Elternverzeichnis eine
+    // Default-ACL, vergibt sie die Rechte, und die `umask` zieht nichts mehr
+    // ab. Wer sie trotzdem anwendet, macht aus einer Freigabe fuer die Gruppe
+    // eine Datei, in die nur der Eigentuemer kommt — und merkt es erst, wenn
+    // der naechste Nutzer nicht mehr herankommt.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("acl-umask");
+    let Some(()) = acls_or_skip(&workspace) else {
+        return;
+    };
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+
+    std::fs::create_dir(pool.path("Freigabe")).expect("Verzeichnis anlegen");
+    std::fs::set_permissions(
+        pool.path("Freigabe"),
+        std::fs::Permissions::from_mode(0o775),
+    )
+    .expect("Rechte setzen");
+    acl_tool(
+        "setfacl",
+        &["-d", "-m", "u:12345:rwx"],
+        &pool.path("Freigabe"),
+    )
+    .expect("Default-ACL setzen");
+
+    create_with_umask(&pool.path("Freigabe/datei.txt"), "077");
+    let text = acl_tool("getfacl", &["-c"], &pool.path("Freigabe/datei.txt")).expect("ACL lesen");
+    let mode = std::fs::symlink_metadata(pool.path("Freigabe/datei.txt"))
+        .expect("Attribute lesen")
+        .mode();
+
+    assert!(
+        text.contains("user:12345:"),
+        "die Default-ACL wurde nicht vererbt:\n{text}"
+    );
+    // 0o077 haette genau diese Bits weggenommen. Dass sie stehen, ist der
+    // Nachweis, dass die `umask` hier nichts zu sagen hatte.
+    assert_ne!(
+        mode & 0o070,
+        0,
+        "die umask hat der Default-ACL die Gruppenrechte weggenommen: {mode:o}"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn without_a_default_acl_the_umask_still_applies() {
+    // Die Gegenprobe. Ohne Default-ACL gilt die `umask` — und da der Kernel
+    // sie mit `FUSE_POSIX_ACL` nicht mehr selbst anwendet, muss dieser Server
+    // es tun. Faellt das aus, entsteht jede Datei mit mehr Rechten als
+    // bestellt, und das faellt niemandem auf.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("acl-umask-gegenprobe");
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+    let _ = std::fs::read_dir(pool.path(""));
+    assert!(
+        pool.counters.posix_acl_available.load(Ordering::Relaxed),
+        "POSIX-ACLs wurden nicht ausgehandelt"
+    );
+
+    create_with_umask(&pool.path("neu.txt"), "027");
+    let mode = std::fs::symlink_metadata(pool.path("neu.txt"))
+        .expect("Attribute lesen")
+        .mode();
+
+    // `: > datei` bittet um 0o666.
+    assert_eq!(
+        mode & 0o777,
+        0o640,
+        "0o666 abzueglich umask 0o027 sind 0o640, nicht {:o}",
+        mode & 0o777
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn a_directory_that_grows_takes_its_default_acl_along() {
+    // Der Fall, an dem eine ACL sonst still auseinanderliefe: Das Verzeichnis
+    // liegt auf Platte 0, die naechste Datei gehoert auf Platte 1. Entstuende
+    // die Kopie dort ohne Default-ACL, bekaeme dieselbe Datei je nach Platte
+    // andere Rechte — und wohin sie faellt, entscheidet die Platzierung.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("acl-wachstum");
+    if !have("setfacl") || !have("getfacl") {
+        eprintln!("uebersprungen: setfacl/getfacl fehlen — Paket `acl` nicht installiert");
+        return;
+    }
+    let Some((_mounts, branches)) = uneven(&workspace) else {
+        return;
+    };
+
+    let ordner = workspace.branch_root(0).join("Ordner");
+    std::fs::create_dir(&ordner).expect("Verzeichnis anlegen");
+    std::fs::set_permissions(&ordner, std::fs::Permissions::from_mode(0o775))
+        .expect("Rechte setzen");
+    if acl_tool("setfacl", &["-d", "-m", "u:12345:rwx"], &ordner).is_err() {
+        eprintln!("uebersprungen: die tmpfs-Branches nehmen keine POSIX-ACLs");
+        return;
+    }
+
+    let pool = Mounted::with_policy(&workspace, branches, SharePolicy::default());
+    std::fs::write(pool.path("Ordner/datei.bin"), b"x").expect("schreiben");
+
+    assert_eq!(
+        on_disk(&workspace, 2, "Ordner/datei.bin"),
+        vec![1],
+        "die Datei sollte auf der leereren Platte landen"
+    );
+    let text =
+        acl_tool("getfacl", &["-c"], &workspace.branch_root(1).join("Ordner")).expect("ACL lesen");
+    assert!(
+        text.contains("default:user:12345:rwx"),
+        "die Default-ACL kam nicht mit auf die zweite Platte:\n{text}"
+    );
+    let inherited = acl_tool(
+        "getfacl",
+        &["-c"],
+        &workspace.branch_root(1).join("Ordner/datei.bin"),
+    )
+    .expect("ACL lesen");
+    assert!(
+        inherited.contains("user:12345:"),
+        "die Datei auf Platte 1 hat die ACL nicht geerbt:\n{inherited}"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn without_the_negotiated_bit_the_umask_beats_the_default_acl() {
+    // Die Gegenprobe zur Aushandlung, und zugleich der Grund, warum sie
+    // noetig ist.
+    //
+    // Ohne `FUSE_POSIX_ACL` weist der Kernel ACL-Attribute **nicht** zurueck:
+    // `setfacl` gelingt, das Attribut landet auf der Platte, und es sieht von
+    // aussen richtig aus. Nur zieht `fuse_create_open` weiterhin die `umask`
+    // ab, und damit verliert die Default-ACL. Genau dieser stille Fall wird
+    // hier festgehalten — er ist der Unterschied zwischen "ACLs gespeichert"
+    // und "ACLs wirksam".
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("acl-abgeschaltet");
+    let Some(()) = acls_or_skip(&workspace) else {
+        return;
+    };
+    let branches = two_branches(&workspace);
+    let pool = Mounted::without_acls(&workspace, branches);
+    let _ = std::fs::read_dir(pool.path(""));
+    assert!(!pool.counters.posix_acl_available.load(Ordering::Relaxed));
+
+    std::fs::create_dir(pool.path("Freigabe")).expect("Verzeichnis anlegen");
+    std::fs::set_permissions(
+        pool.path("Freigabe"),
+        std::fs::Permissions::from_mode(0o775),
+    )
+    .expect("Rechte setzen");
+    // Gelingt — der Kernel legt ACL-Attribute auch ohne das Bit ab.
+    acl_tool(
+        "setfacl",
+        &["-d", "-m", "u:12345:rwx"],
+        &pool.path("Freigabe"),
+    )
+    .expect("Default-ACL setzen");
+
+    create_with_umask(&pool.path("Freigabe/datei.txt"), "077");
+    let mode = std::fs::symlink_metadata(pool.path("Freigabe/datei.txt"))
+        .expect("Attribute lesen")
+        .mode();
+
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "ohne das ausgehandelte Bit gewinnt die umask — das ist der Fall, den
+\n         `a_default_acl_wins_over_the_umask` ausschliesst"
     );
 }

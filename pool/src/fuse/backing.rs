@@ -453,6 +453,27 @@ pub fn remove_xattr(branch: &BranchRoot, relative: &str, name: &CString) -> Resu
     )
 }
 
+/// Der Name der Default-ACL eines Verzeichnisses.
+pub const POSIX_ACL_DEFAULT: &str = "system.posix_acl_default";
+
+/// Traegt dieses Verzeichnis eine Default-ACL?
+///
+/// Entscheidet, ob die `umask` beim Anlegen gilt: Hat das Elternverzeichnis
+/// eine Default-ACL, vergibt **sie** die Rechte, und die `umask` zieht nichts
+/// mehr ab. Genau so steht es in POSIX.1e, und genau so macht es jedes
+/// Dateisystem unter uns auch — nur muss es hier entschieden werden, weil der
+/// Kernel die `umask` mit `FUSE_POSIX_ACL` nicht mehr selbst anwendet.
+pub fn has_default_acl(branch: &BranchRoot, relative: &str) -> bool {
+    let Ok(path) = c_path(&branch.resolve(relative)) else {
+        return false;
+    };
+    let Ok(name) = CString::new(POSIX_ACL_DEFAULT) else {
+        return false;
+    };
+    let size = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    size >= 0
+}
+
 /// Uebertraegt alle erweiterten Attribute von einem Branch auf einen anderen.
 ///
 /// Gebraucht, wenn ein Verzeichnis auf einem zweiten Branch entsteht. Ohne

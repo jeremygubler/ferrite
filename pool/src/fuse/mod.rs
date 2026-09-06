@@ -54,13 +54,26 @@
 //! bevor die Anfrage hier ankommt; eine zweite Pruefung an dieser Stelle
 //! waere eine, die irgendwann von der ersten abweicht.
 //!
-//! # Was ein Pool nicht kann
+//! # POSIX-ACLs
 //!
-//! **POSIX-ACLs** noch nicht: `FUSE_POSIX_ACL` ist nicht angemeldet, und der
-//! Kernel weist `system.posix_acl_access` und `-_default` deshalb selbst mit
-//! `EOPNOTSUPP` zurueck, bevor die Anfrage hier ankommt. Das Bit zu setzen
-//! aendert zugleich die Umask-Behandlung beim Anlegen, und die gehoert in
-//! einen eigenen Schritt.
+//! ACLs sind der Grund, warum ein NAS erweiterte Attribute braucht — Samba
+//! legt seine Rechte dort ab. Sie laufen durch dieselben Handler wie jedes
+//! andere Attribut und liegen deshalb ebenfalls auf jedem Branch, der den
+//! Namen traegt.
+//!
+//! Angemeldet werden `FUSE_POSIX_ACL` **und** `FUSE_DONT_MASK`, und zwar
+//! zusammen. Ohne das zweite Bit zieht der Kernel die `umask` weiter selbst
+//! ab, und dann verliert jede Default-ACL gegen sie: Eine Datei in einem
+//! Verzeichnis, das der Gruppe Schreibrecht vererben soll, entsteht als
+//! `0600`. Das ist der stille Fall — `setfacl` gelingt, das Attribut liegt
+//! auf der Platte, und trotzdem gilt es nicht.
+//!
+//! Mit den beiden Bits liegt die `umask` hier, und es gilt POSIX.1e: Traegt
+//! das Elternverzeichnis eine Default-ACL, vergibt sie die Rechte; sonst
+//! zieht die `umask` ab. Beide Wege stehen als Test, samt der Gegenprobe mit
+//! abgeschalteter Aushandlung.
+//!
+//! # Was ein Pool nicht kann
 //!
 //! **Sperren** (`SETLK`, `GETLK`) beantwortet dieser Server nicht — und das
 //! ist Absicht, siehe [`server`].
