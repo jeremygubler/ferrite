@@ -105,7 +105,7 @@ pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
           xattrs und Sperren — erst entscheiden, dann bauen          [offen]
 ctl/      create, status, run, scrub, replace, rebuild             [fertig]
           discover, check-flush, Konfiguration, systemd-Units      [fertig]
-          Betriebstagebuch und Benachrichtigung                     [offen]
+          Betriebstagebuch und Benachrichtigung                   [fertig]
           gRPC-Daemon und Web-UI                                     [offen]
 ```
 

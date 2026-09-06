@@ -48,6 +48,10 @@ pub enum Command {
     CheckFlush(StatusRequest),
     /// Zeigen, welche Ferrite-Arrays angeschlossen sind.
     Discover(DiscoverRequest),
+    /// Das Betriebstagebuch auswerten.
+    Journal {
+        config: Option<PathBuf>,
+    },
     Help,
     Version,
 }
@@ -231,6 +235,21 @@ pub fn parse(arguments: &[String]) -> Result<Command, ArgError> {
         "discover" => Ok(Command::Discover(DiscoverRequest {
             scan: rest.iter().map(PathBuf::from).collect(),
         })),
+        "journal" => match rest.first().map(String::as_str) {
+            None => Ok(Command::Journal { config: None }),
+            Some("--config") => {
+                let value = rest
+                    .get(1)
+                    .ok_or_else(|| ArgError::MissingValue("--config".to_string()))?;
+                Ok(Command::Journal {
+                    config: Some(PathBuf::from(value)),
+                })
+            }
+            Some(other) => Err(ArgError::UnknownOption {
+                command: "journal",
+                option: other.to_string(),
+            }),
+        },
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
         other => Err(ArgError::UnknownCommand(other.to_string())),
@@ -706,6 +725,16 @@ ferrite — Werkzeug fuer ein Ferrite-Array
 
         Schreibt nichts.
 
+    ferrite journal [--config <DATEI>]
+
+        Wertet das Betriebstagebuch aus: wieviele Stunden, wieviele Scrubs,
+        wieviel Bit-Rot repariert — und die beiden Zahlen, um die es geht:
+        wieviele Bereiche verloren und wieviele Reparaturen abgelehnt.
+
+        Wohin geschrieben wird, sagt `journal =` in der Konfiguration. Ohne
+        Angabe wird nichts aufgezeichnet, und dann ergibt ein Jahr Betrieb
+        nichts, was sich vorzeigen liesse.
+
     ferrite help | version
 ";
 
@@ -1004,6 +1033,7 @@ mod tests {
             "rebuild",
             "discover",
             "check-flush",
+            "journal",
             "help",
             "version",
         ] {

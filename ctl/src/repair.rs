@@ -99,6 +99,7 @@ pub fn scrub(request: &ScrubRequest) -> Result<ScrubOutcome> {
 
     if outcome.is_clean() {
         println!("Die Paritaet passt zu allen Data-Members.");
+        note(&config, &journal_event(&outcome));
         return Ok(outcome);
     }
 
@@ -114,9 +115,11 @@ pub fn scrub(request: &ScrubRequest) -> Result<ScrubOutcome> {
 
     if !request.repair {
         println!(
-            "\nEs wurde nichts geaendert. Zum Neubilden der Paritaet dasselbe Kommando\n\
-             mit --repair. Die Daten gelten dabei als richtig."
+            "
+Es wurde nichts geaendert. Zum Neubilden der Paritaet dasselbe Kommando
+\n             mit --repair. Die Daten gelten dabei als richtig."
         );
+        note(&config, &journal_event(&outcome));
         return Ok(outcome);
     }
 
@@ -130,6 +133,7 @@ pub fn scrub(request: &ScrubRequest) -> Result<ScrubOutcome> {
         outcome.repaired += 1;
     }
     println!("{} Bloecke neu gebildet.", outcome.repaired);
+    note(&config, &journal_event(&outcome));
     Ok(outcome)
 }
 
@@ -215,6 +219,13 @@ pub fn rebuild(request: &RebuildRequest) -> Result<()> {
     }
 
     println!("Slot {} ist wiederhergestellt.", request.slot_index);
+    note(
+        &config,
+        &crate::journal::Event::Rebuilt {
+            slot: request.slot_index,
+            blocks: total,
+        },
+    );
     Ok(())
 }
 
@@ -328,6 +339,12 @@ pub fn replace(plan: &ReplacePlan) -> Result<(String, bool)> {
         .map_err(CtlError::Engine)?;
 
     write_superblock(&device, &superblock).map_err(at(&plan.replacement))?;
+    note(
+        &crate::run::load_config(None).unwrap_or_default(),
+        &crate::journal::Event::Replaced {
+            slot: plan.slot_index,
+        },
+    );
     text.push_str("\nAufgenommen. Jetzt `ferrite rebuild --slot ...` aufrufen.\n");
     Ok((text, true))
 }
@@ -422,4 +439,27 @@ pub fn check_flush(devices: &[PathBuf]) -> Result<bool> {
         );
     }
     Ok(all_honest)
+}
+
+// --- Ins Tagebuch --------------------------------------------------------
+
+/// Das Ereignis zu einem Scrub-Ergebnis.
+fn journal_event(outcome: &ScrubOutcome) -> crate::journal::Event {
+    crate::journal::Event::Scrubbed {
+        checked: outcome.blocks_checked,
+        mismatched: outcome.mismatched.len(),
+        repaired: outcome.repaired,
+    }
+}
+
+/// Schreibt ein Ereignis auf und meldet es, wenn es dringend ist.
+///
+/// Ein Fehler dabei bricht **nichts** ab: Ein volles Dateisystem oder ein
+/// kaputtes Meldeprogramm darf keinen Scrub beenden. Verschwiegen wird er
+/// trotzdem nicht — er steht auf der Fehlerausgabe, und der Vorgang laeuft
+/// weiter.
+pub fn note(config: &crate::config::Config, event: &crate::journal::Event) {
+    if let Err(error) = crate::journal::record(config, event) {
+        eprintln!("Tagebuch/Meldung: {error}");
+    }
 }

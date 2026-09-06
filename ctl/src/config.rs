@@ -63,7 +63,7 @@ pub struct Config {
     /// Telefon will, schreibt drei Zeilen Shell. Wer SMTP einbaut, schleppt
     /// eine Bibliothek mit und trifft trotzdem nie den Geschmack des naechsten
     /// Betreibers.
-    pub notify: Option<PathBuf>,
+    pub notify: Option<String>,
     /// Wohin das Betriebstagebuch geschrieben wird.
     pub journal: Option<PathBuf>,
 }
@@ -173,7 +173,7 @@ impl Config {
                     })?
                 }
                 "overflow" => config.overflow = check_one_of(line, key, value, &["spill", "fail"])?,
-                "notify" => config.notify = Some(PathBuf::from(value)),
+                "notify" => config.notify = Some(value.to_string()),
                 "journal" => config.journal = Some(PathBuf::from(value)),
                 other => {
                     return Err(ConfigError {
@@ -449,11 +449,17 @@ mod tests {
 
     #[test]
     fn a_value_may_contain_spaces_and_equals_signs() {
-        // Pfade duerfen das. Getrennt wird beim **ersten** Gleichheitszeichen.
-        let config = Config::parse("notify = /usr/lib/ferrite/melde --an=telefon\n").unwrap();
+        // `notify` ist eine Kommandozeile, kein Pfad: Programm, dann feste
+        // Argumente. Getrennt wird beim **ersten** Gleichheitszeichen, sonst
+        // ginge `--an=telefon` verloren.
+        let config = Config::parse(
+            "notify = /usr/lib/ferrite/melde --an=telefon
+",
+        )
+        .unwrap();
         assert_eq!(
-            config.notify,
-            Some(PathBuf::from("/usr/lib/ferrite/melde --an=telefon"))
+            config.notify.as_deref(),
+            Some("/usr/lib/ferrite/melde --an=telefon")
         );
     }
 }

@@ -80,7 +80,7 @@ pub fn run(plan: &RunPlan) -> Result<()> {
         });
     }
 
-    let settings = resolve(plan)?;
+    let (settings, config) = resolve(plan)?;
     let writer = crate::run::open_array(&settings.devices)?;
 
     // Je Slot seine **eigene** Groesse. Members duerfen verschieden gross
@@ -140,6 +140,12 @@ pub fn run(plan: &RunPlan) -> Result<()> {
         }
     };
 
+    crate::repair::note(
+        &config,
+        &crate::journal::Event::Started {
+            members: settings.devices.len(),
+        },
+    );
     println!("Bereit. Beenden mit Strg-C oder SIGTERM.");
     wait_for_signal();
     println!("\nBeende.");
@@ -152,6 +158,7 @@ pub fn run(plan: &RunPlan) -> Result<()> {
         mounted.stop();
     }
     stop_all(devices);
+    crate::repair::note(&config, &crate::journal::Event::Stopped);
     println!("Alles abgebaut.");
     Ok(())
 }
@@ -176,23 +183,26 @@ struct Settings {
 /// Die Geraeteliste ist der Sonderfall: Ist sie leer, wird gesucht, wo die
 /// Konfiguration es sagt. Genau so startet die systemd-Unit — `ferrite run`
 /// ohne ein einziges Argument.
-fn resolve(plan: &RunPlan) -> Result<Settings> {
+fn resolve(plan: &RunPlan) -> Result<(Settings, crate::config::Config)> {
     let config = crate::run::load_config(plan.config.as_deref())?;
     let devices = crate::run::devices_or_search(&plan.devices, &config)?;
     if plan.devices.is_empty() {
         println!("{} Members gefunden.", devices.len());
     }
 
-    Ok(Settings {
-        devices,
-        pool: plan.pool.clone().or(config.pool.clone()),
-        state_dir: plan
-            .state_dir
-            .clone()
-            .unwrap_or_else(|| config.state_dir.clone()),
-        fstype: plan.fstype.clone().unwrap_or_else(|| config.fstype.clone()),
-        policy: config.share_policy(),
-    })
+    Ok((
+        Settings {
+            devices,
+            pool: plan.pool.clone().or(config.pool.clone()),
+            state_dir: plan
+                .state_dir
+                .clone()
+                .unwrap_or_else(|| config.state_dir.clone()),
+            fstype: plan.fstype.clone().unwrap_or_else(|| config.fstype.clone()),
+            policy: config.share_policy(),
+        },
+        config,
+    ))
 }
 
 // --- Der Pool -------------------------------------------------------------

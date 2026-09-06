@@ -566,3 +566,177 @@ fn check_flush_is_honest_about_a_file() {
     assert!(text.contains("Undecidable"), "{text}");
     assert!(text.contains("Write-Through"), "{text}");
 }
+
+// --- Betriebstagebuch und Meldung ------------------------------------------
+
+/// Legt eine Konfiguration mit Tagebuch und Meldeprogramm an.
+///
+/// Das Meldeprogramm ist ein Shell-Skript, das seinen Betreff in eine Datei
+/// schreibt — so wie ein Betreiber drei Zeilen fuer sein Telefon schriebe.
+fn with_journal(array: &Array, notify: bool) -> (String, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let journal = array.disks.0.join("journal");
+    let meldungen = array.disks.0.join("meldungen");
+    let melde = array.disks.0.join("melde.sh");
+
+    let mut text = format!("journal = {}\n", journal.display());
+    if notify {
+        std::fs::write(
+            &melde,
+            format!("#!/bin/sh\necho \"$1\" >> {}\n", meldungen.display()),
+        )
+        .expect("Meldeprogramm");
+        std::fs::set_permissions(&melde, std::fs::Permissions::from_mode(0o755))
+            .expect("ausfuehrbar");
+        text.push_str(&format!("notify = {}\n", melde.display()));
+    }
+
+    let config = array.disks.0.join("ferrite.conf");
+    std::fs::write(&config, text).expect("Konfiguration");
+    (config.display().to_string(), journal, meldungen)
+}
+
+#[test]
+fn a_scrub_writes_a_line_into_the_journal() {
+    let array = Array::new("tagebuch");
+    let (config, journal, _) = with_journal(&array, false);
+
+    let mut line = vec!["scrub"];
+    line.extend(array.devices());
+    line.extend(["--config", &config]);
+    assert_eq!(code(&ferrite(&line)), 0);
+
+    let text = std::fs::read_to_string(&journal).expect("Tagebuch");
+    assert!(text.contains(" scrub info "), "{text}");
+    assert!(text.contains("mismatched=0"), "{text}");
+}
+
+#[test]
+fn the_journal_command_adds_the_lines_up() {
+    let array = Array::new("auswertung");
+    let (config, _, _) = with_journal(&array, false);
+
+    let mut line = vec!["scrub"];
+    line.extend(array.devices());
+    line.extend(["--config", &config]);
+    ferrite(&line);
+    ferrite(&line);
+
+    let output = ferrite(&["journal", "--config", &config]);
+    assert_eq!(code(&output), 0, "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Scrubs"), "{text}");
+    assert!(
+        text.contains("Bereiche verloren"),
+        "die Zahl, um die es geht, fehlt:\n{text}"
+    );
+}
+
+#[test]
+fn a_finding_reaches_the_notification_program() {
+    // Ein Scrub mit Befund ist eine Warnung — und Warnungen werden gemeldet.
+    let array = Array::new("meldung");
+    let (config, _, meldungen) = with_journal(&array, true);
+    put(&array.paths[0], 0, &pattern(1, 4096));
+
+    let mut line = vec!["scrub"];
+    line.extend(array.devices());
+    line.extend(["--config", &config]);
+    assert_eq!(code(&ferrite(&line)), 1);
+
+    let text = std::fs::read_to_string(&meldungen).expect("es muss gemeldet worden sein");
+    assert!(text.contains("Scrub:"), "{text}");
+    assert!(text.contains("passen nicht"), "{text}");
+}
+
+#[test]
+fn a_clean_scrub_wakes_nobody() {
+    // Ein Alarm, der jede Woche kommt, wird ignoriert — und dann auch der,
+    // auf den es ankam.
+    let array = Array::new("keine-meldung");
+    let (config, journal, meldungen) = with_journal(&array, true);
+
+    let mut line = vec!["scrub"];
+    line.extend(array.devices());
+    line.extend(["--config", &config]);
+    assert_eq!(code(&ferrite(&line)), 0);
+
+    assert!(
+        std::fs::read_to_string(&journal).is_ok(),
+        "aufgeschrieben wird trotzdem"
+    );
+    assert!(
+        !meldungen.exists(),
+        "ein sauberer Scrub darf niemanden wecken"
+    );
+}
+
+#[test]
+fn a_broken_notification_program_does_not_stop_the_scrub() {
+    // Ein kaputtes Meldeprogramm darf keinen Scrub beenden. Verschwiegen wird
+    // der Fehler trotzdem nicht.
+    let array = Array::new("kaputte-meldung");
+    let journal = array.disks.0.join("journal");
+    let config_path = array.disks.0.join("ferrite.conf");
+    std::fs::write(
+        &config_path,
+        format!("journal = {}\nnotify = /gibt/es/nicht\n", journal.display()),
+    )
+    .expect("Konfiguration");
+    let config = config_path.display().to_string();
+    put(&array.paths[0], 0, &pattern(1, 4096));
+
+    let mut line = vec!["scrub"];
+    line.extend(array.devices());
+    line.extend(["--config", &config]);
+    let output = ferrite(&line);
+
+    assert_eq!(code(&output), 1, "der Befund bleibt der Rueckgabewert");
+    assert!(
+        stderr(&output).contains("Meldung"),
+        "der Fehler muss dastehen: {}",
+        stderr(&output)
+    );
+    assert!(
+        std::fs::read_to_string(&journal)
+            .expect("Tagebuch")
+            .contains("scrub"),
+        "aufgeschrieben wurde trotzdem"
+    );
+}
+
+#[test]
+fn without_a_journal_setting_the_command_says_what_to_do() {
+    let array = Array::new("kein-tagebuch");
+    let config_path = array.disks.0.join("ferrite.conf");
+    std::fs::write(&config_path, "# leer\n").expect("Konfiguration");
+
+    let output = ferrite(&["journal", "--config", &config_path.display().to_string()]);
+    assert_ne!(code(&output), 0);
+    assert!(stderr(&output).contains("journal ="), "{}", stderr(&output));
+}
+
+#[test]
+fn a_replaced_disk_shows_up_in_the_journal() {
+    let array = Array::new("tagebuch-ersatz");
+    let (config, journal, _) = with_journal(&array, false);
+    let fresh = array.disks.disk("neu").display().to_string();
+
+    // `replace` liest die Konfiguration am ueblichen Ort; hier wird sie
+    // ueber die Umgebung nicht gesetzt, also muss der Scrub den Eintrag
+    // machen. Geprueft wird deshalb ueber den Rebuild-Weg.
+    let mut line = vec!["replace"];
+    line.extend(array.without(0));
+    line.extend(["--slot", "0", "--with", &fresh, "--yes"]);
+    assert_eq!(code(&ferrite(&line)), 0);
+
+    let mut line = vec!["rebuild"];
+    line.extend(array.without(0));
+    line.push(&fresh);
+    line.extend(["--slot", "0", "--config", &config]);
+    assert_eq!(code(&ferrite(&line)), 0);
+
+    let text = std::fs::read_to_string(&journal).expect("Tagebuch");
+    assert!(text.contains(" rebuild info "), "{text}");
+}

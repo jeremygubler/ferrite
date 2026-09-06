@@ -21,7 +21,7 @@ echter Hardware. Lege nichts darauf ab, wovon du nur eine Kopie hast.
 läuft auf jedem Rechner: `format/` beschreibt Bytes, `parity/` rechnet, `engine/`
 plant, `broker/` liest die Befunde von btrfs, `pool/` entscheidet über die
 Platzierung, `ctl/` bedient das Ganze, `integration/` spielt alles
-gegeneinander durch. Zusammen 459 Tests und sechs Fuzz-Targets, alle ohne
+gegeneinander durch. Zusammen 474 Tests und sechs Fuzz-Targets, alle ohne
 Platte.
 
 Das ist Absicht. Ein Speicherprojekt, an dem man nur mit sechs Festplatten im

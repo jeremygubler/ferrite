@@ -29,6 +29,7 @@ pub mod config;
 /// Ferrite findet seine Platten selbst. Die Suche braucht ein Betriebssystem
 /// mit Blockgeraeten, das Ordnen der Fundstellen nicht.
 pub mod discover;
+pub mod journal;
 /// Scrub, Ersatz und Rebuild. Braucht Geraete, aber weder ublk noch FUSE.
 #[cfg(unix)]
 pub mod repair;

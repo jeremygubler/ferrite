@@ -41,6 +41,7 @@ fn main() -> ExitCode {
         Command::Rebuild(request) => execute_rebuild(&request),
         Command::CheckFlush(request) => execute_check_flush(&request.devices),
         Command::Discover(request) => execute_discover(&request),
+        Command::Journal { config } => execute_journal(config.as_deref()),
     }
 }
 
@@ -230,5 +231,41 @@ fn execute_check_flush(_devices: &[std::path::PathBuf]) -> ExitCode {
 #[cfg(not(unix))]
 fn execute_discover(_request: &ferrite_ctl::args::DiscoverRequest) -> ExitCode {
     eprintln!("ferrite discover braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
+}
+
+#[cfg(unix)]
+fn execute_journal(config: Option<&std::path::Path>) -> ExitCode {
+    let config = match ferrite_ctl::run::load_config(config) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(path) = &config.journal else {
+        eprintln!(
+            "Es wird kein Tagebuch gefuehrt. `journal = /var/lib/ferrite/journal`\n\
+             in die Konfiguration eintragen — ohne Aufzeichnung ergibt ein Jahr\n\
+             Betrieb nichts, was sich vorzeigen liesse."
+        );
+        return ExitCode::from(2);
+    };
+
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let summary = ferrite_ctl::journal::summarize(&text);
+    print!("{}", ferrite_ctl::journal::render(&summary));
+
+    // Wie bei `status`: Die Zahl sagt, ob jemand hinsehen muss.
+    if summary.needs_attention() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+#[cfg(not(unix))]
+fn execute_journal(_config: Option<&std::path::Path>) -> ExitCode {
+    eprintln!("ferrite journal braucht ein System mit Blockgeraeten.");
     ExitCode::from(EXIT_USAGE)
 }

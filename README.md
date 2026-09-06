@@ -210,8 +210,19 @@ Entwickler nie findet.
    `packaging/systemd/` bringt die Unit und einen monatlichen Scrub-Timer mit
    — **ohne** `--repair`: Ein Zeitplan, der von selbst Parität neu bildet,
    überschriebe eine veraltete auch dann, wenn die Ursache noch da ist.
-   Offen bleiben das Betriebstagebuch, die Benachrichtigung und danach der
-   Daemon samt Web-UI.
+   Und Ferrite **führt Buch**. Ein Jahr Betrieb ohne Aufzeichnung ergibt „lief
+   eigentlich gut" — das überzeugt niemanden und findet kein Muster. Eine Zeile
+   je Ereignis, greppbar und für einen Menschen lesbar; `ferrite journal`
+   zählt sie zusammen. Am Ende stehen die beiden Zahlen, um die es geht:
+   **wieviele Bereiche verloren** und **wieviele Reparaturen abgelehnt**.
+   An derselben Stelle hängt die Benachrichtigung — gemeldet wird ab
+   *Warnung*, und die Schwelle steht an genau einem Ort. Ein sauberer Scrub
+   weckt niemanden: Ein Alarm, der jede Woche kommt, wird ignoriert, und dann
+   auch der, auf den es ankam. Gemeldet wird über ein Programm, das der
+   Betreiber schreibt — drei Zeilen Shell reichen fürs Telefon; SMTP einzubauen
+   hieße eine Bibliothek mitzuschleppen und trotzdem nie den Geschmack des
+   nächsten Betreibers zu treffen.
+   Offen bleibt der Daemon samt Web-UI.
 7. **OS-Image.** Erst jetzt. Bis hierhin läuft Ferrite als Paket auf
    bestehenden Distributionen.
 
@@ -232,7 +243,7 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
-| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test — 109 Tests grün, davon 32 gegen das echte Binary ohne Root (Reparaturablauf und Konfiguration). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. systemd-Units in `packaging/`. Tagebuch, Meldung, Daemon und Web-UI offen |
+| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. systemd-Units in `packaging/`. Daemon und Web-UI offen |
 
 ```
 cargo test

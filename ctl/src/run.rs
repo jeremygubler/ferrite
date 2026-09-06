@@ -392,6 +392,16 @@ pub fn open_array(devices: &[PathBuf]) -> Result<ArrayWriter> {
 
     // Vor dem ersten Blockgeraet, nicht danach.
     let recovered = writer.recover(&recovery).map_err(CtlError::Engine)?;
+    // Auch ein Recovery ohne Arbeit gehoert ins Tagebuch: Nach einem Jahr
+    // ist die Zahl der sauberen Starts genauso eine Aussage wie die der
+    // unsauberen.
+    crate::repair::note(
+        &load_config(None).unwrap_or_default(),
+        &crate::journal::Event::Recovered {
+            applied: recovered.applied,
+            lost: recovered.lost.len(),
+        },
+    );
     if recovered.applied > 0 {
         println!(
             "Recovery: {} Writes aus dem Log angewendet.",
