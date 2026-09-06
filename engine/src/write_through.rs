@@ -57,7 +57,9 @@ use core::ops::Range;
 
 use ferrite_format::superblock::{MemberState, Role, Superblock};
 use ferrite_format::FormatError;
-use ferrite_parity::{compute_p, compute_q, gf, reconstruct_from_p, reconstruct_from_q, Slot};
+use ferrite_parity::{
+    compute_p, compute_q, gf, reconstruct_from_p, reconstruct_from_q, reconstruct_two_from_pq, Slot,
+};
 
 use crate::device::{write_superblock, MemberDevice};
 use crate::error::{EngineError, Result};
@@ -337,19 +339,45 @@ impl ArrayWriter {
         self.reconstruct(slot_index, offset, buffer)
     }
 
-    /// Rekonstruiert einen Bereich eines Data-Slots aus P und den uebrigen
-    /// Data-Slots.
+    /// Rekonstruiert einen Bereich eines Data-Slots aus der Paritaet.
     ///
-    /// Setzt voraus, dass alle **anderen** Data-Slots an dieser Stelle
-    /// brauchbar sind. Fehlen zwei, reicht P nicht mehr — dann braeuchte es Q,
-    /// und `parity/` kann das; hier fehlt aber noch die Buchfuehrung, welcher
-    /// zweite Slot gemeint ist. Der Fall wird gemeldet statt geraten.
+    /// # Wieviel fehlen darf
+    ///
+    /// Genau soviel, wie Paritaet da ist. Fehlt **ein** Slot, reicht P. Fehlen
+    /// **zwei** und es gibt ein Q, loest `parity/` das Gleichungssystem nach
+    /// beiden auf — dafuer ist Q da. Fehlen drei, gibt es keine Antwort, und
+    /// die wird gemeldet statt geraten.
+    ///
+    /// Welche Slots fehlen, steht nicht in einer eigenen Liste, sondern in den
+    /// Superbloecken: `member_state` und `rebuild_progress` sagen es. Ein
+    /// zweiter Ort fuer denselben Zustand waere ein Ort, an dem er abweichen
+    /// kann.
+    ///
+    /// Der gesuchte Slot zaehlt immer als fehlend, auch wenn sein Superblock
+    /// ihn fuer brauchbar haelt — wer hier landet, hat gerade einen Lesefehler
+    /// von ihm bekommen oder repariert ihn.
     pub fn reconstruct(&self, slot_index: u16, offset: u64, out: &mut [u8]) -> Result<()> {
         let target = self.member(slot_index)?;
         self.check_within(target, offset, out.len())?;
 
-        let contents = self.survivor_contents(slot_index, offset, out.len())?;
-        let survivors = survivor_slots(&contents, slot_index)?;
+        let missing = self.missing_with(slot_index, offset, out.len());
+        match missing.len() {
+            1 => self.reconstruct_from_parity_p(slot_index, &missing, offset, out),
+            2 => self.reconstruct_pair(slot_index, &missing, offset, out),
+            _ => Err(EngineError::CannotRebuild { role: Role::Data }),
+        }
+    }
+
+    /// Der Regelfall: ein fehlender Slot, P reicht.
+    fn reconstruct_from_parity_p(
+        &self,
+        slot_index: u16,
+        missing: &[u16],
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<()> {
+        let contents = self.survivor_contents(missing, offset, out.len())?;
+        let survivors = survivor_slots(&contents, missing)?;
 
         let mut parity = vec![0u8; out.len()];
         self.parity_p.read_extended(offset, &mut parity)?;
@@ -363,6 +391,76 @@ impl ArrayWriter {
         .map_err(EngineError::from_parity)
     }
 
+    /// Zwei fehlende Slots: P und Q zusammen, ueber `reconstruct_two_from_pq`.
+    ///
+    /// Beide werden gerechnet — anders geht es nicht, das Gleichungssystem hat
+    /// zwei Unbekannte. Zurueckgegeben wird nur der gesuchte; der andere wird
+    /// weggeworfen. Ihn gleich mitzuschreiben waere verlockend und falsch: Der
+    /// Aufrufer hat nur fuer einen Slot einen Puffer, und wer hier nebenbei auf
+    /// eine Platte schriebe, umginge den Rebuild samt seiner Buchfuehrung ueber
+    /// den Fortschritt.
+    fn reconstruct_pair(
+        &self,
+        slot_index: u16,
+        missing: &[u16],
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<()> {
+        if self.parity_q.is_none() {
+            // Ohne Q deckt die Paritaet einen Ausfall ab, nicht zwei.
+            return Err(EngineError::CannotRebuild { role: Role::Data });
+        }
+        let contents = self.survivor_contents(missing, offset, out.len())?;
+        let survivors = survivor_slots(&contents, missing)?;
+
+        let mut parity_p = vec![0u8; out.len()];
+        let mut parity_q = vec![0u8; out.len()];
+        self.parity_p.read_extended(offset, &mut parity_p)?;
+        self.read_parity_q(offset, &mut parity_q)?;
+
+        let mut first = vec![0u8; out.len()];
+        let mut second = vec![0u8; out.len()];
+        reconstruct_two_from_pq(
+            self.data_slot_count(),
+            missing[0] as u8,
+            missing[1] as u8,
+            &survivors,
+            &parity_p,
+            &parity_q,
+            &mut first,
+            &mut second,
+        )
+        .map_err(EngineError::from_parity)?;
+
+        out.copy_from_slice(if slot_index == missing[0] {
+            &first
+        } else {
+            &second
+        });
+        Ok(())
+    }
+
+    /// Die Data-Slots, deren Inhalt an dieser Stelle nicht von der Platte
+    /// kommen kann: die als unbrauchbar gemeldeten plus der gesuchte.
+    ///
+    /// Aufsteigend sortiert, jeder einmal — `reconstruct_two_from_pq` verlangt
+    /// zwei verschiedene Indizes, und die Reihenfolge entscheidet, welches
+    /// Ergebnis zu welchem Slot gehoert.
+    fn missing_with(&self, target: u16, offset: u64, len: usize) -> Vec<u16> {
+        let mut missing: Vec<u16> = self
+            .data
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| !member.is_valid_over(offset, len, self.block_size_log2))
+            .map(|(index, _)| index as u16)
+            .collect();
+        if !missing.contains(&target) {
+            missing.push(target);
+        }
+        missing.sort_unstable();
+        missing
+    }
+
     /// Dieselbe Rekonstruktion, aber aus Q statt aus P.
     ///
     /// Allein taugt sie zu nichts, was `reconstruct` nicht auch koennte — ihr
@@ -371,8 +469,9 @@ impl ArrayWriter {
         let target = self.member(slot_index)?;
         self.check_within(target, offset, out.len())?;
 
-        let contents = self.survivor_contents(slot_index, offset, out.len())?;
-        let survivors = survivor_slots(&contents, slot_index)?;
+        let missing = [slot_index];
+        let contents = self.survivor_contents(&missing, offset, out.len())?;
+        let survivors = survivor_slots(&contents, &missing)?;
 
         let mut parity = vec![0u8; out.len()];
         self.read_parity_q(offset, &mut parity)?;
@@ -386,14 +485,18 @@ impl ArrayWriter {
         .map_err(EngineError::from_parity)
     }
 
-    /// Liest alle Data-Members ausser `slot_index`.
+    /// Liest alle Data-Members ausser den fehlenden.
     ///
-    /// An dessen Stelle steht ein leerer Vektor: Er ist die Unbekannte, sein
+    /// An deren Stelle steht ein leerer Vektor: Sie sind die Unbekannten, ihr
     /// Inhalt auf der Platte gilt hier gerade nicht.
-    fn survivor_contents(&self, slot_index: u16, offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
+    ///
+    /// Ein Slot, der **nicht** in `missing` steht, muss brauchbar sein — sonst
+    /// war die Liste falsch aufgestellt, und die Rechnung darunter bekaeme
+    /// Muell als Ueberlebenden. Deshalb wird es hier noch einmal geprueft.
+    fn survivor_contents(&self, missing: &[u16], offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
         let mut contents = Vec::with_capacity(self.data.len());
         for (index, member) in self.data.iter().enumerate() {
-            if index == usize::from(slot_index) {
+            if missing.contains(&(index as u16)) {
                 contents.push(Vec::new());
                 continue;
             }
@@ -439,6 +542,14 @@ impl ArrayWriter {
     /// Zusicherung.
     pub fn reconstruct_verified(&self, slot_index: u16, offset: u64, out: &mut [u8]) -> Result<()> {
         if self.parity_q.is_none() {
+            return Err(EngineError::NoSecondSource);
+        }
+        // Fehlt neben dem gesuchten noch ein zweiter Slot, sind P und Q von
+        // der Rechnung bereits aufgebraucht: zwei Gleichungen, zwei
+        // Unbekannte, genau eine Loesung — und keine dritte Quelle, an der sie
+        // sich messen liesse. Rekonstruieren geht dann noch, gegenpruefen
+        // nicht.
+        if self.missing_with(slot_index, offset, out.len()).len() > 1 {
             return Err(EngineError::NoSecondSource);
         }
 
@@ -931,6 +1042,13 @@ impl ArrayWriter {
     ///
     /// Fehlen zwei Slots oder gibt es kein Q, ist die Frage unbeantwortbar.
     /// Dann kommt ein Fehler und kein geratenes `true`.
+    ///
+    /// Dass [`ArrayWriter::reconstruct`] bei zwei fehlenden Slots trotzdem
+    /// arbeitet, ist kein Widerspruch: Rekonstruieren und Pruefen sind
+    /// verschiedene Fragen. Zwei Unbekannte und zwei Gleichungen haben genau
+    /// eine Loesung — die laesst sich ausrechnen, aber an nichts mehr messen.
+    /// Wer hier ein `true` zurueckgaebe, pruefte die Rechnung gegen sich
+    /// selbst.
     pub fn verify_parity(&self, offset: u64, len: usize) -> Result<bool> {
         let invalid: Vec<u16> = self
             .data
@@ -1110,12 +1228,12 @@ fn checkpoint_before_parity() -> bool {
     false
 }
 
-/// Baut die Slot-Sicht auf alle Data-Members ausser dem gesuchten.
-fn survivor_slots(contents: &[Vec<u8>], target: u16) -> Result<Vec<Slot<'_>>> {
+/// Baut die Slot-Sicht auf alle Data-Members ausser den fehlenden.
+fn survivor_slots<'a>(contents: &'a [Vec<u8>], missing: &[u16]) -> Result<Vec<Slot<'a>>> {
     contents
         .iter()
         .enumerate()
-        .filter(|(index, _)| *index != usize::from(target))
+        .filter(|(index, _)| !missing.contains(&(*index as u16)))
         .map(|(index, data)| Slot::new(index as u8, data).map_err(EngineError::from_parity))
         .collect()
 }

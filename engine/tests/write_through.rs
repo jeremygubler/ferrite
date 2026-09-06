@@ -560,24 +560,6 @@ fn a_clean_member_has_nothing_to_rebuild() {
 }
 
 #[test]
-fn two_unusable_members_stop_the_reconstruction() {
-    // Mit P allein laesst sich genau ein fehlender Slot rekonstruieren. Bei
-    // zweien braeuchte es Q — das kann `parity/`, aber die Buchfuehrung
-    // darueber fehlt hier noch. Gemeldet statt geraten.
-    let mut scratch = Scratch::new("zwei-fehlen");
-    let mut writer = build(&mut scratch, &[BLOCK; 4], true);
-    writer.write(0, 0, &pattern(1, 1024)).unwrap();
-
-    writer.mark_member(1, MemberState::Stale, 0).unwrap();
-    writer.mark_member(2, MemberState::Stale, 0).unwrap();
-
-    assert!(matches!(
-        writer.read(1, 0, &mut [0u8; 1024]),
-        Err(EngineError::CannotRebuild { .. })
-    ));
-}
-
-#[test]
 fn a_write_to_a_not_yet_rebuilt_block_keeps_the_parity_right() {
     // Der Fall, den ein Rebuild im laufenden Betrieb erzeugt: Ein Write geht
     // auf einen Block, den der Member noch nicht zurueckbekommen hat. Sein
@@ -864,4 +846,214 @@ fn a_range_the_rebuild_still_owes_is_left_to_the_rebuild() {
         Repair::LeftToRebuild,
         "eine Einzelreparatur unterhalb des Rebuild-Fortschritts ist wirkungslos"
     );
+}
+
+// --- Zwei Platten gleichzeitig ausgefallen --------------------------------
+//
+// Wofuer Q ueberhaupt da ist. P deckt einen Ausfall, Q den zweiten — und wer
+// Q auf die Platte schreibt, ohne sie im Ausfall benutzen zu koennen, bezahlt
+// den Schreibaufwand und bekommt den Schutz nicht.
+
+/// Ein Array mit vier Data-Slots, P und Q, auf dem etwas steht.
+fn four_slots(scratch: &mut Scratch, with_q: bool) -> ArrayWriter {
+    let mut writer = build(scratch, &[BLOCK; 4], with_q);
+    for slot in 0..4u16 {
+        writer
+            .write(slot, 0, &pattern(slot as u8 * 7 + 1, 8192))
+            .expect("Grundinhalt schreiben");
+    }
+    writer
+}
+
+#[test]
+fn two_failed_slots_are_reconstructed_from_p_and_q() {
+    let mut scratch = Scratch::new("doppelausfall");
+    let mut writer = four_slots(&mut scratch, true);
+
+    // Zwei Platten melden sich ab. Der Inhalt beider ist danach nur noch aus
+    // der Paritaet zu holen.
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+
+    let mut found = vec![0u8; 8192];
+    writer.read(1, 0, &mut found).expect("Slot 1 lesen");
+    assert_eq!(found, pattern(8, 8192));
+
+    writer.read(3, 0, &mut found).expect("Slot 3 lesen");
+    assert_eq!(found, pattern(3 * 7 + 1, 8192));
+
+    // Und die heilen Slots kommen weiterhin direkt von der Platte.
+    writer.read(0, 0, &mut found).expect("Slot 0 lesen");
+    assert_eq!(found, pattern(1, 8192));
+}
+
+#[test]
+fn without_parity_q_two_failed_slots_are_refused() {
+    // Die Gegenprobe: Ohne Q deckt die Paritaet einen Ausfall ab, nicht zwei.
+    // Ein Array, das hier etwas zurueckgaebe, gaebe Muell zurueck.
+    let mut scratch = Scratch::new("doppelt-ohne-q");
+    let mut writer = four_slots(&mut scratch, false);
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+
+    let mut found = vec![0u8; 8192];
+    assert_eq!(
+        writer.read(1, 0, &mut found),
+        Err(EngineError::CannotRebuild { role: Role::Data })
+    );
+}
+
+#[test]
+fn three_failed_slots_are_refused_even_with_q() {
+    // P und Q sind zwei Gleichungen. Drei Unbekannte loest das nicht, und
+    // Raten ist hier keine Antwort.
+    let mut scratch = Scratch::new("dreifach");
+    let mut writer = four_slots(&mut scratch, true);
+    for slot in [0, 1, 2] {
+        writer.mark_member(slot, MemberState::Stale, 0).unwrap();
+    }
+
+    let mut found = vec![0u8; 8192];
+    assert_eq!(
+        writer.read(0, 0, &mut found),
+        Err(EngineError::CannotRebuild { role: Role::Data })
+    );
+}
+
+#[test]
+fn a_write_keeps_working_while_two_slots_are_gone() {
+    // Der Betrieb geht weiter. Danach muss die Paritaet zu allem passen, was
+    // noch da ist — sonst rekonstruiert der naechste Rebuild Muell.
+    let mut scratch = Scratch::new("doppelt-schreiben");
+    let mut writer = four_slots(&mut scratch, true);
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+
+    // Auf einen heilen und auf einen ausgefallenen Slot.
+    writer.write(0, 0, &pattern(200, 4096)).expect("Slot 0");
+    writer.write(1, 4096, &pattern(201, 4096)).expect("Slot 1");
+
+    let mut found = vec![0u8; 4096];
+    writer.read(0, 0, &mut found).unwrap();
+    assert_eq!(found, pattern(200, 4096));
+
+    // Der Write auf den ausgefallenen Slot ist nur ueber die Paritaet zu
+    // sehen — genau das ist der Fall, in dem die Rechnung schiefgehen kann.
+    writer.read(1, 4096, &mut found).unwrap();
+    assert_eq!(found, pattern(201, 4096));
+}
+
+#[test]
+fn both_slots_come_back_after_a_rebuild() {
+    // Die eigentliche Zusage: Zwei Platten werden getauscht, und danach steht
+    // wieder alles auf ihnen.
+    let mut scratch = Scratch::new("doppelter-rebuild");
+    let mut writer = four_slots(&mut scratch, true);
+    let expected_one = pattern(8, 8192);
+    let expected_three = pattern(3 * 7 + 1, 8192);
+
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+
+    // Der erste Rebuild laeuft, waehrend der zweite Slot noch fehlt — jeder
+    // Block braucht dafuer P und Q zugleich.
+    {
+        let mut rebuild = DiskRebuild::resume(&writer, 1).expect("Rebuild 1");
+        rebuild.run(&mut writer, 64).expect("Rebuild 1 laeuft");
+    }
+    assert_eq!(
+        writer.member(1).unwrap().superblock().member_state,
+        MemberState::Clean,
+        "nach dem Rebuild muss der Member wieder gelten"
+    );
+
+    // Ab hier fehlt nur noch einer, P allein reicht.
+    {
+        let mut rebuild = DiskRebuild::resume(&writer, 3).expect("Rebuild 3");
+        rebuild.run(&mut writer, 64).expect("Rebuild 3 laeuft");
+    }
+
+    let mut found = vec![0u8; 8192];
+    writer.read(1, 0, &mut found).unwrap();
+    assert_eq!(found, expected_one);
+    writer.read(3, 0, &mut found).unwrap();
+    assert_eq!(found, expected_three);
+
+    assert!(
+        writer.verify_parity(0, 8192).expect("Paritaet pruefen"),
+        "nach dem Rebuild muss die Paritaet wieder zum Inhalt passen"
+    );
+}
+
+#[test]
+fn the_rebuilt_content_really_comes_from_the_disk() {
+    // Ohne diesen Test koennte der Rebuild gar nichts geschrieben haben: Die
+    // Reads darueber liefen dann weiter ueber die Rekonstruktion und saehen
+    // dasselbe. Hier wird an der Rekonstruktion vorbei gelesen.
+    let mut scratch = Scratch::new("doppelt-auf-der-platte");
+    let mut writer = four_slots(&mut scratch, true);
+    let expected = pattern(8, 8192);
+
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+    {
+        let mut rebuild = DiskRebuild::resume(&writer, 1).expect("Rebuild");
+        rebuild.run(&mut writer, 64).expect("Rebuild laeuft");
+    }
+
+    let member = writer.member(1).unwrap();
+    let mut raw = vec![0u8; 8192];
+    member
+        .device()
+        .read_at(DEFAULT_PAYLOAD_OFFSET, &mut raw)
+        .expect("roh lesen");
+    assert_eq!(raw, expected, "auf der Platte steht nicht der Inhalt");
+}
+
+#[test]
+fn two_missing_slots_cannot_be_verified_against_anything() {
+    // Rekonstruieren geht, pruefen nicht: Zwei Gleichungen und zwei
+    // Unbekannte haben genau eine Loesung, und die laesst sich an nichts mehr
+    // messen. Ein `true` waere hier die Rechnung gegen sich selbst.
+    let mut scratch = Scratch::new("doppelt-unpruefbar");
+    let mut writer = four_slots(&mut scratch, true);
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+
+    assert_eq!(
+        writer.verify_parity(0, 8192),
+        Err(EngineError::CannotRebuild { role: Role::Data })
+    );
+
+    // Auch die Reparatur eines **heilen** Slots geht jetzt nicht mehr: Der
+    // fehlende zweite hat die Gegenprobe aufgebraucht. Slot 0 selbst ist in
+    // Ordnung — es fehlt die zweite Quelle, nicht die erste.
+    assert_eq!(writer.repair(0, 0, 4096), Err(EngineError::NoSecondSource));
+
+    // Fuer den ausgefallenen Slot ist es ohnehin Sache des Rebuilds.
+    assert_eq!(writer.repair(1, 0, 4096), Ok(Repair::LeftToRebuild));
+}
+
+#[test]
+fn a_partly_rebuilt_member_counts_as_missing_only_where_it_is() {
+    // Der Fortschritt gilt blockweise. Unterhalb der Grenze traegt der Member
+    // wieder Daten und zaehlt nicht mehr als fehlend — sonst braeuchte jeder
+    // Read auch dort noch Q, und der zweite Ausfall waere unnoetig teuer.
+    let mut scratch = Scratch::new("halb-fertig");
+    let mut writer = four_slots(&mut scratch, true);
+    writer.mark_member(1, MemberState::Stale, 0).unwrap();
+    writer.mark_member(3, MemberState::Stale, 0).unwrap();
+
+    // Genau einen Block wiederaufbauen.
+    {
+        let mut rebuild = DiskRebuild::resume(&writer, 1).expect("Rebuild");
+        rebuild.step(&mut writer, 1).expect("ein Block");
+    }
+
+    let mut found = vec![0u8; 4096];
+    // Im fertigen Block fehlt nur noch Slot 3 — das geht auch ohne Q.
+    writer
+        .read(3, 0, &mut found)
+        .expect("aus dem fertigen Bereich");
+    assert_eq!(found, pattern(3 * 7 + 1, 4096));
 }

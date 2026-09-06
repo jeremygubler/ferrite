@@ -30,9 +30,16 @@ Vier Dinge daran sind es nicht:
 | | Unraid | Ferrite |
 |---|---|---|
 | Bit-Rot im Array | wird still mitgeparitet | wird erkannt und repariert |
-| Schreibpfad | Read-Modify-Write pro Write | Write-Log, Parität gebündelt |
+| Absturz beim Schreiben | Parität kann veralten | Write-Log, Recovery nach 5.2 |
 | Kernel | gepatchter `md`-Treiber | Stock-Kernel, Engine im Userspace |
 | Zustand | Config im USB-Flash | Superblöcke + deklarative Config |
+
+**Zum Durchsatz sagt diese Tabelle bewusst nichts.** Ferrite schreibt heute im
+Write-Through: Read-Modify-Write der Parität wie bei Unraid, plus einen
+Log-Record. Das ist pro Write *mehr* I/O, nicht weniger. Der Vorteil käme erst
+mit gebündelter Parität im Write-Back-Modus — und der ist gesperrt, bis ein
+Gerät nachweislich ehrlich flusht (Abschnitt 5.3). Solange das gilt, wäre eine
+Zeile über Geschwindigkeit eine Behauptung ohne Deckung.
 
 **Selbstheilung ohne Mirror.** Jeder Data-Member trägt btrfs mit Prüfsummen.
 Meldet btrfs einen korrupten Block, rekonstruiert der Repair-Broker ihn aus der
@@ -75,6 +82,11 @@ Entwickler nie findet.
    Code Bytes auf eine echte Platte schreiben.
 2. **Paritäts-Engine.** Reed-Solomon P+Q, Gerätezugriff und das Write-Log auf
    Platte, das ublk-Target, der Schreibpfad und der Rebuild sind fertig.
+   Auch der **Doppelausfall**: Fallen zwei Datenplatten gleichzeitig aus, löst
+   die Engine das Gleichungssystem aus P und Q nach beiden auf — der Gast liest
+   weiter, und der Rebuild holt beide zurück. Q auf die Platte zu schreiben,
+   ohne sie im Ernstfall benutzen zu können, hieße den Aufwand zu bezahlen und
+   den Schutz nicht zu bekommen.
    Offen bleibt der Write-Back-Modus — er braucht ein Gerät, dessen Flush
    nachweislich ehrlich ist.
    **Braucht Linux** mit geladenem `ublk_drv`.
@@ -172,7 +184,7 @@ von Anfang an mitläuft.
 | `format/` | Superblock samt Member-Zustand, Assemble, Write-Log mit Ringpuffer und Recovery, Golden Vectors, 6 Fuzz-Targets — 103 Tests grün |
 | `parity/` | GF(2^8), P+Q, Rekonstruktion aller Ein- und Zwei-Slot-Fälle — 32 Tests grün |
 | `integration/` | In-Memory-Generalprobe, wiederaufsetzbarer Rebuild — 9 Tests grün |
-| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion, Rebuild, Recovery und Reparatur mit Gegenprobe — 153 Tests grün (143 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
+| `engine/` | Planung von Schreibpfad und Rebuild, Gerätezugriff, Array, Flush-Test nach 5.3, Write-Log auf Platte, ublk-Target mit btrfs darauf, Schreibpfad mit Parität, Rekonstruktion (ein **und zwei** ausgefallene Slots), Rebuild, Recovery und Reparatur mit Gegenprobe — 160 Tests grün (150 davon plattformunabhängig), dazu 9 auf Blockgeräten und 9 auf echten ublk-Geräten |
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`, Lesen und Schreiben: 24 Tests an einem echt eingehängten Pool, in CI. Passthrough, xattrs und Sperren offen |
