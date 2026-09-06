@@ -40,15 +40,30 @@
 //! [`Counters`](server::Counters) mit, und deshalb pruefen die Mount-Tests
 //! nicht den Inhalt, sondern die Zahl der `READ`-Anfragen, die hier ankamen.
 //!
+//! # Erweiterte Attribute
+//!
+//! Die Frage war, welcher Branch zaehlt, wenn ein Verzeichnis auf mehreren
+//! liegt. Die Antwort ist dieselbe wie bei `chmod`: **gelesen wird vom
+//! bedienenden Branch, geschrieben auf jeden, der den Namen traegt.** Fuer
+//! eine Datei ist das genau einer. Und wenn ein Verzeichnis auf einer
+//! zweiten Platte entsteht, kommen seine Attribute mit — sonst bekaeme eine
+//! Datei je nach Platte andere Rechte, sobald eine Default-ACL im Spiel ist.
+//!
+//! Gefiltert wird kein Namensraum. Wer `trusted.*` oder `security.*` setzen
+//! darf, entscheidet der Kernel im VFS anhand der Rechte des Aufrufers,
+//! bevor die Anfrage hier ankommt; eine zweite Pruefung an dieser Stelle
+//! waere eine, die irgendwann von der ersten abweicht.
+//!
 //! # Was ein Pool nicht kann
 //!
-//! **Erweiterte Attribute** (`getxattr` und Verwandte) beantwortet er mit
-//! `ENOSYS`. Sie tragen unter anderem POSIX-ACLs, und eine ACL, die nur auf
-//! einem von mehreren Branches eines Verzeichnisses liegt, gilt je nachdem,
-//! welcher gerade bedient. Das gehoert entschieden, bevor es gebaut wird.
+//! **POSIX-ACLs** noch nicht: `FUSE_POSIX_ACL` ist nicht angemeldet, und der
+//! Kernel weist `system.posix_acl_access` und `-_default` deshalb selbst mit
+//! `EOPNOTSUPP` zurueck, bevor die Anfrage hier ankommt. Das Bit zu setzen
+//! aendert zugleich die Umask-Behandlung beim Anlegen, und die gehoert in
+//! einen eigenen Schritt.
 //!
-//! **Sperren** (`SETLK`, `GETLK`) ebenso: Eine Sperre ueber Platten hinweg
-//! braucht eine Stelle, die sie fuehrt.
+//! **Sperren** (`SETLK`, `GETLK`) beantwortet dieser Server nicht — und das
+//! ist Absicht, siehe [`server`].
 //!
 //! # Voraussetzungen
 //!

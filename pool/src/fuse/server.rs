@@ -32,6 +32,7 @@
 //! eigene Aenderung.
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::{File, Metadata};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,6 +88,13 @@ pub struct Counters {
     pub reads: AtomicU64,
     /// `WRITE`-Anfragen, die dieser Prozess bedient hat.
     pub writes: AtomicU64,
+    /// Attribute, die beim Spiegeln eines Verzeichnisses nicht mitkamen.
+    ///
+    /// Nicht jedes Dateisystem nimmt jedes Attribut an. Das Verzeichnis
+    /// deswegen gar nicht anzulegen waere schlimmer — dann koennte die Datei,
+    /// um die es ging, nirgends hin. Gezaehlt wird es trotzdem, sonst
+    /// verschwindet es lautlos.
+    pub xattrs_not_mirrored: AtomicU64,
     /// Erfolgreich wieder freigegebene `backing_id`s.
     ///
     /// Muss am Ende zu [`Counters::passthrough_opens`] passen. Weicht es ab,
@@ -232,6 +240,12 @@ impl PoolFs {
             abi::FUSE_RENAME => Some(self.rename(header.nodeid, data, false)),
             abi::FUSE_RENAME2 => Some(self.rename(header.nodeid, data, true)),
             abi::FUSE_SETATTR => Some(self.setattr(header.nodeid, data)),
+
+            // --- Erweiterte Attribute ---
+            abi::FUSE_GETXATTR => Some(self.getxattr(header.nodeid, data)),
+            abi::FUSE_LISTXATTR => Some(self.listxattr(header.nodeid, data)),
+            abi::FUSE_SETXATTR => Some(self.setxattr(header.nodeid, data)),
+            abi::FUSE_REMOVEXATTR => Some(self.removexattr(header.nodeid, data)),
 
             // Alles andere kann dieser Server noch nicht. `ENOSYS` und nicht
             // `EIO`: Der Kernel merkt sich, dass es diese Operation nicht
@@ -857,6 +871,97 @@ impl PoolFs {
         self.getattr(nodeid)
     }
 
+    // --- Erweiterte Attribute ---------------------------------------------
+    //
+    // # Die Regel
+    //
+    // **Gelesen wird vom bedienenden Branch, geschrieben auf jeden, der den
+    // Namen traegt.** Fuer eine Datei ist das genau einer. Ein Verzeichnis
+    // liegt oft auf mehreren, und truegen die verschiedene Attribute, haenge
+    // es vom bedienenden Branch ab, welche gelten — dieselbe Ueberlegung wie
+    // bei `chmod` in [`PoolFs::setattr`].
+    //
+    // Gefiltert wird nichts. Wer `trusted.*` oder `security.*` setzen darf,
+    // entscheidet der Kernel im VFS anhand der Rechte des Aufrufers, bevor
+    // die Anfrage hier ankommt; eine zweite Pruefung an dieser Stelle waere
+    // eine, die irgendwann von der ersten abweicht.
+
+    fn getxattr(&mut self, nodeid: u64, data: &[u8]) -> Answer {
+        let Some(request) = abi::GetxattrIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let name = xattr_name(data.get(abi::GetxattrIn::SIZE..).ok_or(-libc::EINVAL)?)?;
+        let path = self.path_of(nodeid)?;
+        let branch = self.serving(&path)?;
+
+        let value = backing::get_xattr(&branch, &path, &name).map_err(|e| backing::errno_of(&e))?;
+        answer_sized(request.size, value)
+    }
+
+    fn listxattr(&mut self, nodeid: u64, data: &[u8]) -> Answer {
+        let Some(request) = abi::GetxattrIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let path = self.path_of(nodeid)?;
+        let branch = self.serving(&path)?;
+
+        let names = backing::list_xattr(&branch, &path).map_err(|e| backing::errno_of(&e))?;
+        answer_sized(request.size, names)
+    }
+
+    fn setxattr(&mut self, nodeid: u64, data: &[u8]) -> Answer {
+        let Some(request) = abi::SetxattrIn::decode(data) else {
+            return Err(-libc::EINVAL);
+        };
+        let rest = data.get(abi::SetxattrIn::SIZE..).ok_or(-libc::EINVAL)?;
+        let name = xattr_name(rest)?;
+        // Der Wert steht hinter dem Namen samt dessen Nullbyte.
+        let value = rest
+            .get(name.as_bytes().len() + 1..)
+            .ok_or(-libc::EINVAL)?
+            .get(..request.size as usize)
+            .ok_or(-libc::EINVAL)?;
+
+        let path = self.path_of(nodeid)?;
+        self.on_every_carrier(&path, |root, path| {
+            backing::set_xattr(root, path, &name, value, request.flags as i32)
+        })
+    }
+
+    fn removexattr(&mut self, nodeid: u64, data: &[u8]) -> Answer {
+        let name = xattr_name(data)?;
+        let path = self.path_of(nodeid)?;
+        self.on_every_carrier(&path, |root, path| backing::remove_xattr(root, path, &name))
+    }
+
+    /// Fuehrt eine Aenderung auf jedem Branch aus, der den Namen traegt.
+    ///
+    /// Der **erste** Fehler zaehlt, und die Schleife bricht ab. Weiterzumachen
+    /// hiesse, einen Teil der Platten zu aendern und dem Aufrufer trotzdem
+    /// einen Fehler zu melden — er wuesste dann nicht, was gilt.
+    fn on_every_carrier<F>(&mut self, path: &str, mut action: F) -> Answer
+    where
+        F: FnMut(&BranchRoot, &str) -> Result<()>,
+    {
+        let carriers = self.carriers(path);
+        if carriers.is_empty() {
+            return Err(-libc::ENOENT);
+        }
+        for branch in &carriers {
+            let Some(root) = self.branch(*branch).cloned() else {
+                continue;
+            };
+            action(&root, path).map_err(|e| backing::errno_of(&e))?;
+        }
+        Ok(Vec::new())
+    }
+
+    /// Der Branch, der diesen Pfad bedient.
+    fn serving(&mut self, path: &str) -> std::result::Result<BranchRoot, i32> {
+        let branch = self.serving_branch(path).ok_or(-libc::ENOENT)?;
+        self.branch(branch).cloned().ok_or(-libc::ENOENT)
+    }
+
     // --- Platzierung ------------------------------------------------------
 
     /// Waehlt den Branch fuer ein neues Objekt.
@@ -948,6 +1053,13 @@ impl PoolFs {
                 .map_err(|e| backing::errno_of(&e))?;
             backing::clone_metadata(&metadata, &root, ancestor)
                 .map_err(|e| backing::errno_of(&e))?;
+            // Auch die erweiterten Attribute: Eine Default-ACL, die nur auf
+            // dem ersten Branch liegt, hiesse, dass eine Datei je nach
+            // Platte mit anderen Rechten entsteht.
+            let (_, failed) = backing::copy_xattrs(&from, &root, ancestor);
+            self.counters
+                .xattrs_not_mirrored
+                .fetch_add(failed as u64, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -1143,6 +1255,39 @@ fn stamp(present: bool, now: bool, seconds: i64, nanos: u32) -> Timestamp {
 }
 
 /// Der nullterminierte Name am Anfang der Nutzlast.
+/// Der Name eines erweiterten Attributs aus dem Anfragerumpf.
+///
+/// Anders als bei [`name_of`] wird hier **nicht** auf UTF-8 bestanden: Ein
+/// Attributname ist eine Bytefolge und geht unveraendert an den Systemaufruf
+/// weiter. Ein leerer Name ist keiner, und ein Nullbyte mittendrin gehoert
+/// abgewiesen, statt den Namen still abzuschneiden.
+fn xattr_name(data: &[u8]) -> std::result::Result<CString, i32> {
+    let end = data
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(-libc::EINVAL)?;
+    if end == 0 {
+        return Err(-libc::EINVAL);
+    }
+    CString::new(&data[..end]).map_err(|_| -libc::EINVAL)
+}
+
+/// Beantwortet ein `GETXATTR` oder `LISTXATTR` nach dem zweistufigen
+/// Protokoll.
+///
+/// `size == 0` heisst: Der Aufrufer fragt nur, wie gross der Puffer sein
+/// muesste. Ist sein Puffer zu klein, ist das `ERANGE` — und ausdruecklich
+/// kein abgeschnittener Wert, denn eine halbe ACL waere eine andere ACL.
+fn answer_sized(size: u32, value: Vec<u8>) -> Answer {
+    if size == 0 {
+        return Ok(abi::getxattr_out(value.len() as u32).into_bytes());
+    }
+    if value.len() > size as usize {
+        return Err(-libc::ERANGE);
+    }
+    Ok(value)
+}
+
 fn name_of(data: &[u8]) -> std::result::Result<&str, i32> {
     let end = data
         .iter()

@@ -14,6 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -1221,5 +1222,274 @@ fn every_handed_over_file_is_taken_back() {
         pool.counters.backing_closes.load(Ordering::Relaxed),
         opens,
         "jede hinterlegte Datei muss wieder freigegeben werden"
+    );
+}
+
+// --- Erweiterte Attribute -------------------------------------------------
+//
+// Die Regel, die hier geprueft wird: gelesen vom bedienenden Branch,
+// geschrieben auf jeden, der den Namen traegt. Fuer eine Datei ist das genau
+// einer; ein Verzeichnis liegt oft auf mehreren, und truegen die
+// verschiedene Attribute, haenge es vom bedienenden Branch ab, welche gelten.
+
+fn c_str(path: &Path) -> CString {
+    CString::new(path.as_os_str().as_bytes()).expect("Pfad ohne Nullbyte")
+}
+
+fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
+    let path = c_str(path);
+    let name = CString::new(name).expect("Name ohne Nullbyte");
+    let result = unsafe {
+        libc::lsetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn get_xattr(path: &Path, name: &str) -> std::io::Result<Vec<u8>> {
+    let path = c_str(path);
+    let name = CString::new(name).expect("Name ohne Nullbyte");
+    let mut value = vec![0u8; 4096];
+    let read = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    value.truncate(read as usize);
+    Ok(value)
+}
+
+fn list_xattr(path: &Path) -> std::io::Result<BTreeSet<String>> {
+    let path = c_str(path);
+    let mut names = vec![0u8; 8192];
+    let read = unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    names.truncate(read as usize);
+    Ok(names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
+}
+
+fn remove_xattr(path: &Path, name: &str) -> std::io::Result<()> {
+    let path = c_str(path);
+    let name = CString::new(name).expect("Name ohne Nullbyte");
+    let result = unsafe { libc::lremovexattr(path.as_ptr(), name.as_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `None` mit Begruendung, wenn das Dateisystem unter den Branches keine
+/// `user.*`-Attribute kann.
+///
+/// tmpfs konnte sie erst ab Kernel 6.6, und ein Dateisystem ohne `user_xattr`
+/// gibt es auch heute noch. Dann ueberspringen — ein Test, der gruen ist,
+/// ohne dass je ein Attribut geschrieben wurde, sagt nichts.
+fn xattrs_or_skip(workspace: &Workspace) -> Option<()> {
+    std::fs::create_dir_all(workspace.branch_root(0)).expect("Branch anlegen");
+    let probe = workspace.branch_root(0).join(".probe");
+    std::fs::write(&probe, b"x").expect("Probe anlegen");
+    let supported = set_xattr(&probe, "user.ferrite.probe", b"1").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if !supported {
+        eprintln!("uebersprungen: das Dateisystem unter den Branches kann keine user.*-Attribute");
+        return None;
+    }
+    Some(())
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn an_attribute_on_a_file_comes_back_byte_for_byte() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("xattr-datei");
+    let Some(()) = xattrs_or_skip(&workspace) else {
+        return;
+    };
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+
+    let datei = pool.path("nur-null.txt");
+    // Ein Wert mit Nullbyte und mit hohen Bytes: Attributwerte sind Bytes und
+    // keine Zeichenkette. Wer sie durch einen String reicht, verliert genau
+    // das hier.
+    let wert: &[u8] = &[0x00, 0xff, b'a', 0x00, 0x80];
+    set_xattr(&datei, "user.ferrite.test", wert).expect("Attribut setzen");
+
+    assert_eq!(
+        get_xattr(&datei, "user.ferrite.test").expect("Attribut lesen"),
+        wert
+    );
+    assert!(list_xattr(&datei)
+        .expect("Attribute auflisten")
+        .contains("user.ferrite.test"));
+
+    // Und wirklich auf der Platte, nicht nur im Kopf des Kernels.
+    assert_eq!(
+        get_xattr(
+            &workspace.branch_root(0).join("nur-null.txt"),
+            "user.ferrite.test"
+        )
+        .expect("auf der Platte lesen"),
+        wert
+    );
+
+    remove_xattr(&datei, "user.ferrite.test").expect("Attribut entfernen");
+    assert_eq!(
+        get_xattr(&datei, "user.ferrite.test")
+            .expect_err("das Attribut ist weg")
+            .raw_os_error(),
+        Some(libc::ENODATA)
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn an_attribute_on_a_directory_reaches_every_branch() {
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("xattr-ordner");
+    let Some(()) = xattrs_or_skip(&workspace) else {
+        return;
+    };
+    let branches = two_branches(&workspace);
+    // `Filme` liegt bisher nur auf Branch 0 — fuer diesen Test soll es auf
+    // beiden liegen.
+    write(
+        &workspace.branch_root(1).join("Filme/drei.mkv"),
+        "auch hier",
+    );
+    let pool = Mounted::start(&workspace, branches);
+
+    set_xattr(&pool.path("Filme"), "user.ferrite.share", b"medien").expect("Attribut setzen");
+
+    for slot in 0..2 {
+        assert_eq!(
+            get_xattr(
+                &workspace.branch_root(slot).join("Filme"),
+                "user.ferrite.share"
+            )
+            .unwrap_or_else(|error| panic!("Branch {slot} traegt das Attribut nicht: {error}")),
+            b"medien",
+            "Branch {slot}"
+        );
+    }
+
+    // Und wieder weg, ebenfalls ueberall. Bliebe es auf einem Branch stehen,
+    // taeuchte es wieder auf, sobald der die Auskunft bedient.
+    remove_xattr(&pool.path("Filme"), "user.ferrite.share").expect("Attribut entfernen");
+    for slot in 0..2 {
+        assert_eq!(
+            get_xattr(
+                &workspace.branch_root(slot).join("Filme"),
+                "user.ferrite.share"
+            )
+            .expect_err("das Attribut muss weg sein")
+            .raw_os_error(),
+            Some(libc::ENODATA),
+            "Branch {slot}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn a_directory_that_grows_onto_a_second_branch_takes_its_attributes_along() {
+    // Derselbe Fall wie bei den Rechten, eine Ebene tiefer: Eine Default-ACL
+    // liegt als erweitertes Attribut auf dem Verzeichnis. Entsteht die Kopie
+    // auf der zweiten Platte ohne sie, bekommen Dateien dort andere Rechte —
+    // und welche, haengt davon ab, wohin die Platzierung sie gerade legt.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("xattr-wachstum");
+    let Some((_mounts, branches)) = uneven(&workspace) else {
+        return;
+    };
+
+    let ordner = workspace.branch_root(0).join("Ordner");
+    std::fs::create_dir(&ordner).expect("Verzeichnis anlegen");
+    if set_xattr(&ordner, "user.ferrite.share", b"medien").is_err() {
+        eprintln!("uebersprungen: die tmpfs-Branches nehmen keine user.*-Attribute");
+        return;
+    }
+
+    let pool = Mounted::with_policy(&workspace, branches, SharePolicy::default());
+    std::fs::write(pool.path("Ordner/datei.bin"), b"x").expect("schreiben");
+
+    assert_eq!(
+        on_disk(&workspace, 2, "Ordner/datei.bin"),
+        vec![1],
+        "die Datei sollte auf der leereren Platte landen"
+    );
+    assert_eq!(
+        get_xattr(
+            &workspace.branch_root(1).join("Ordner"),
+            "user.ferrite.share"
+        )
+        .expect("das Attribut kam nicht mit auf die zweite Platte"),
+        b"medien"
+    );
+    assert_eq!(
+        pool.counters.xattrs_not_mirrored.load(Ordering::Relaxed),
+        0,
+        "kein Attribut darf unterwegs verloren gehen"
+    );
+}
+
+#[test]
+#[ignore = "braucht Linux, /dev/fuse und das Recht einzuhaengen"]
+fn a_buffer_that_is_too_small_is_erange_and_not_a_half_value() {
+    // Eine halbe ACL ist eine andere ACL. Der zweistufige Ablauf — erst nach
+    // der Groesse fragen, dann holen — muss deshalb `ERANGE` liefern und
+    // nicht abschneiden.
+    let Some(()) = prerequisites() else { return };
+    let workspace = Workspace::new("xattr-erange");
+    let Some(()) = xattrs_or_skip(&workspace) else {
+        return;
+    };
+    let branches = two_branches(&workspace);
+    let pool = Mounted::start(&workspace, branches);
+
+    let datei = pool.path("nur-null.txt");
+    set_xattr(&datei, "user.ferrite.lang", &[b'x'; 200]).expect("Attribut setzen");
+
+    let path = c_str(&datei);
+    let name = CString::new("user.ferrite.lang").expect("Name ohne Nullbyte");
+
+    // Erst die Frage nach der Groesse.
+    let needed = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    assert_eq!(needed, 200, "die gemeldete Groesse stimmt nicht");
+
+    // Dann mit einem Puffer, der eins zu klein ist.
+    let mut small = vec![0u8; 199];
+    let read = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            small.as_mut_ptr().cast(),
+            small.len(),
+        )
+    };
+    assert_eq!(read, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ERANGE)
     );
 }

@@ -36,6 +36,10 @@ pub const FUSE_WRITE: u32 = 16;
 pub const FUSE_STATFS: u32 = 17;
 pub const FUSE_RELEASE: u32 = 18;
 pub const FUSE_FSYNC: u32 = 20;
+pub const FUSE_SETXATTR: u32 = 21;
+pub const FUSE_GETXATTR: u32 = 22;
+pub const FUSE_LISTXATTR: u32 = 23;
+pub const FUSE_REMOVEXATTR: u32 = 24;
 pub const FUSE_FLUSH: u32 = 25;
 pub const FUSE_INIT: u32 = 26;
 pub const FUSE_OPENDIR: u32 = 27;
@@ -150,6 +154,7 @@ pub const OPEN_OUT_SIZE: usize = 16;
 pub const KSTATFS_SIZE: usize = 80;
 pub const DIRENT_HEADER_SIZE: usize = 24;
 pub const WRITE_OUT_SIZE: usize = 8;
+pub const GETXATTR_OUT_SIZE: usize = 8;
 pub const CREATE_OUT_SIZE: usize = ENTRY_OUT_SIZE + OPEN_OUT_SIZE;
 
 /// Wieviele Bytes der Antwort auf `FUSE_INIT` geschrieben werden.
@@ -355,6 +360,55 @@ impl MknodIn {
         (bytes.len() >= Self::SIZE).then(|| MknodIn {
             mode: u32_at(bytes, 0),
             rdev: u32_at(bytes, 4),
+        })
+    }
+}
+
+/// `struct fuse_getxattr_in`, gefolgt vom Namen — und ohne Namen bei
+/// `LISTXATTR`.
+///
+/// `size` ist die Groesse des Puffers, den der Aufrufer bereithaelt. **Null
+/// heisst: nur fragen, wie gross es waere.** Dann gehoert ein
+/// [`getxattr_out`] in die Antwort und nicht der Wert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetxattrIn {
+    pub size: u32,
+}
+
+impl GetxattrIn {
+    pub const SIZE: usize = 8;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() >= Self::SIZE).then(|| GetxattrIn {
+            size: u32_at(bytes, 0),
+        })
+    }
+}
+
+/// `struct fuse_setxattr_in`, gefolgt von Name und Wert.
+///
+/// # Warum acht Bytes und nicht sechzehn
+///
+/// Seit 7.33 traegt die Struktur zwei weitere Felder, aber der Kernel
+/// schickt sie nur, wenn der Server `FUSE_SETXATTR_EXT` angemeldet hat.
+/// Dieser tut das nicht — also kommt die alte Form
+/// (`FUSE_COMPAT_SETXATTR_IN_SIZE`). Wer hier sechzehn annaehme, laese den
+/// Namen ab der falschen Stelle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetxattrIn {
+    /// Laenge des Wertes, der hinter dem Namen steht.
+    pub size: u32,
+    /// `XATTR_CREATE` oder `XATTR_REPLACE`, oder null.
+    pub flags: u32,
+}
+
+impl SetxattrIn {
+    pub const SIZE: usize = 8;
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() >= Self::SIZE).then(|| SetxattrIn {
+            size: u32_at(bytes, 0),
+            flags: u32_at(bytes, 4),
         })
     }
 }
@@ -647,6 +701,17 @@ pub fn create_out(
 pub fn write_out(written: u32) -> Writer {
     let mut out = Writer::with_capacity(WRITE_OUT_SIZE);
     out.u32(written).u32(0);
+    out
+}
+
+/// `struct fuse_getxattr_out`: die Groesse, die der Wert haette.
+///
+/// Antwort auf ein `GETXATTR` oder `LISTXATTR` mit `size == 0`. Der Aufrufer
+/// legt danach einen Puffer dieser Groesse an und fragt noch einmal.
+pub fn getxattr_out(size: u32) -> Writer {
+    let mut out = Writer::with_capacity(GETXATTR_OUT_SIZE);
+    out.u32(size).u32(0);
+    debug_assert_eq!(out.len(), GETXATTR_OUT_SIZE);
     out
 }
 

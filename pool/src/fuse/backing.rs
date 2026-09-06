@@ -362,6 +362,135 @@ pub fn clone_metadata(from: &Metadata, to: &BranchRoot, relative: &str) -> Resul
     set_owner(to, relative, Some(from.uid()), Some(from.gid()))
 }
 
+// --- Erweiterte Attribute -------------------------------------------------
+//
+// Durchweg die `l`-Varianten: Ein Symlink im Pool traegt eigene Attribute,
+// und wer ihm folgte, schriebe sie auf das Ziel — womoeglich ausserhalb des
+// Pools.
+
+/// Der Wert eines erweiterten Attributs.
+pub fn get_xattr(branch: &BranchRoot, relative: &str, name: &CString) -> Result<Vec<u8>> {
+    let path = c_path(&branch.resolve(relative))?;
+    // Zwei Aufrufe, und dazwischen kann sich der Wert aendern. Deshalb die
+    // Schleife: Wurde er zwischen Messen und Holen laenger, sagt der zweite
+    // Aufruf `ERANGE`, und wir messen neu, statt einen halben Wert zu
+    // liefern.
+    loop {
+        let needed =
+            unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+        if needed < 0 {
+            return Err(last_error("Attribut messen"));
+        }
+        let mut value = vec![0u8; needed as usize];
+        let read = unsafe {
+            libc::lgetxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        if read >= 0 {
+            value.truncate(read as usize);
+            return Ok(value);
+        }
+        if errno() != libc::ERANGE {
+            return Err(last_error("Attribut lesen"));
+        }
+    }
+}
+
+/// Die Namen aller erweiterten Attribute, mit Nullbyte getrennt.
+pub fn list_xattr(branch: &BranchRoot, relative: &str) -> Result<Vec<u8>> {
+    let path = c_path(&branch.resolve(relative))?;
+    loop {
+        let needed = unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
+        if needed < 0 {
+            return Err(last_error("Attributliste messen"));
+        }
+        let mut names = vec![0u8; needed as usize];
+        let read =
+            unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+        if read >= 0 {
+            names.truncate(read as usize);
+            return Ok(names);
+        }
+        if errno() != libc::ERANGE {
+            return Err(last_error("Attributliste lesen"));
+        }
+    }
+}
+
+/// Setzt ein erweitertes Attribut.
+pub fn set_xattr(
+    branch: &BranchRoot,
+    relative: &str,
+    name: &CString,
+    value: &[u8],
+    flags: i32,
+) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe {
+            libc::lsetxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                flags,
+            )
+        },
+        "Attribut setzen",
+    )
+}
+
+/// Entfernt ein erweitertes Attribut.
+pub fn remove_xattr(branch: &BranchRoot, relative: &str, name: &CString) -> Result<()> {
+    let path = c_path(&branch.resolve(relative))?;
+    check(
+        unsafe { libc::lremovexattr(path.as_ptr(), name.as_ptr()) },
+        "Attribut entfernen",
+    )
+}
+
+/// Uebertraegt alle erweiterten Attribute von einem Branch auf einen anderen.
+///
+/// Gebraucht, wenn ein Verzeichnis auf einem zweiten Branch entsteht. Ohne
+/// das truegen die beiden Kopien verschiedene Attribute — und bei einer
+/// Default-ACL heisst das, dass Dateien je nach Branch mit verschiedenen
+/// Rechten entstehen.
+///
+/// # Warum ein Fehlschlag hier keiner ist
+///
+/// Nicht jedes Dateisystem nimmt jedes Attribut an, und `trusted.*` braucht
+/// `CAP_SYS_ADMIN`. Ein Verzeichnis deswegen gar nicht erst anzulegen waere
+/// schlimmer als eines ohne alle Attribute — die Datei, um die es eigentlich
+/// ging, koennte dann nirgends hin. Was nicht ging, steht in der
+/// Rueckgabe: die Zahl der uebertragenen Attribute und die der gescheiterten.
+pub fn copy_xattrs(from: &BranchRoot, to: &BranchRoot, relative: &str) -> (usize, usize) {
+    let Ok(names) = list_xattr(from, relative) else {
+        return (0, 0);
+    };
+    let (mut copied, mut failed) = (0, 0);
+    for name in names.split(|byte| *byte == 0) {
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(name) = CString::new(name) else {
+            continue;
+        };
+        let Ok(value) = get_xattr(from, relative, &name) else {
+            failed += 1;
+            continue;
+        };
+        match set_xattr(to, relative, &name, &value, 0) {
+            Ok(()) => copied += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    (copied, failed)
+}
+
 /// Was `statvfs` ueber einen Branch sagt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Space {
@@ -452,6 +581,19 @@ fn check(result: libc::c_int, what: &'static str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn last_error(what: &'static str) -> PoolError {
+    let error = std::io::Error::last_os_error();
+    PoolError::Io {
+        what,
+        kind: error.kind(),
+        raw_os_error: error.raw_os_error(),
+    }
 }
 
 fn io_error(what: &'static str) -> impl FnOnce(std::io::Error) -> PoolError {
