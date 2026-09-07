@@ -30,6 +30,8 @@ pub mod config;
 /// mit Blockgeraeten, das Ordnen der Fundstellen nicht.
 pub mod discover;
 pub mod journal;
+/// JSON schreiben — fuer alles, was den Zustand weiterverarbeitet.
+pub mod json;
 /// Die Handbuchseite, erzeugt aus derselben Quelle wie die Hilfe.
 pub mod man;
 /// Scrub, Ersatz und Rebuild. Braucht Geraete, aber weder ublk noch FUSE.

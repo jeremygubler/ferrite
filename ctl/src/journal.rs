@@ -325,6 +325,53 @@ pub struct Summary {
     pub alerts: u64,
 }
 
+/// Die Zusammenfassung als JSON.
+///
+/// Die beiden Zahlen, um die es geht, heissen auch hier so: `ranges_lost`
+/// und `repairs_refused`. Eine Oberflaeche, die sie nicht anzeigt, verschweigt
+/// das Einzige, was ein Jahr Betrieb wirklich beantwortet.
+pub fn summary_json(summary: &Summary) -> String {
+    use crate::json::Value;
+
+    Value::object(vec![
+        ("entries", Value::Number(summary.entries)),
+        ("unreadable", Value::Number(summary.unreadable)),
+        ("hours", Value::Number(summary.hours())),
+        (
+            "first",
+            match summary.span {
+                Some((first, _)) if first >= 0 => Value::Number(first as u64),
+                _ => Value::Null,
+            },
+        ),
+        (
+            "last",
+            match summary.span {
+                Some((_, last)) if last >= 0 => Value::Number(last as u64),
+                _ => Value::Null,
+            },
+        ),
+        ("starts", Value::Number(summary.starts)),
+        ("recoveries", Value::Number(summary.recoveries)),
+        ("writes_recovered", Value::Number(summary.writes_recovered)),
+        ("ranges_lost", Value::Number(summary.ranges_lost)),
+        ("scrubs", Value::Number(summary.scrubs)),
+        ("blocks_checked", Value::Number(summary.blocks_checked)),
+        (
+            "blocks_mismatched",
+            Value::Number(summary.blocks_mismatched),
+        ),
+        ("parity_rebuilt", Value::Number(summary.parity_rebuilt)),
+        ("bit_rot_repaired", Value::Number(summary.bit_rot_repaired)),
+        ("bytes_repaired", Value::Number(summary.bytes_repaired)),
+        ("repairs_refused", Value::Number(summary.repairs_refused)),
+        ("rebuilds", Value::Number(summary.rebuilds)),
+        ("replacements", Value::Number(summary.replacements)),
+        ("alerts", Value::Number(summary.alerts)),
+    ])
+    .render()
+}
+
 impl Summary {
     /// Wieviele Stunden zwischen dem ersten und dem letzten Eintrag liegen.
     pub fn hours(&self) -> u64 {

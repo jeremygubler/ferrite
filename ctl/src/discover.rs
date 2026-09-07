@@ -152,6 +152,69 @@ pub fn group(found: Vec<Found>) -> Scan {
 /// uebergangen — in `/dev/disk/by-id` liegt vieles, was kein Ferrite-Member
 /// ist, und jedes davon zu melden waere Laerm statt Auskunft.
 #[cfg(unix)]
+/// Der Suchlauf als JSON.
+///
+/// Dieselbe Auskunft wie die Textausgabe, nur ohne Saetze. Groessen in Bytes.
+pub fn scan_json(scan: &Scan, searched: &[PathBuf]) -> String {
+    use crate::json::Value;
+
+    let arrays = scan
+        .arrays
+        .iter()
+        .map(|(uuid, members)| {
+            Value::object(vec![
+                ("array", Value::text(uuid)),
+                (
+                    "members",
+                    Value::List(
+                        members
+                            .iter()
+                            .map(|found| {
+                                Value::object(vec![
+                                    ("device", Value::text(found.path.display().to_string())),
+                                    ("role", Value::text(role_name(found.superblock.role))),
+                                    (
+                                        "slot",
+                                        Value::Number(u64::from(found.superblock.slot_index)),
+                                    ),
+                                    ("size", Value::Number(found.superblock.payload_size)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ])
+        })
+        .collect();
+
+    Value::object(vec![
+        ("arrays", Value::List(arrays)),
+        ("looked_at", Value::Number(scan.looked_at as u64)),
+        ("duplicates", Value::Number(scan.duplicates as u64)),
+        (
+            "searched",
+            Value::List(
+                searched
+                    .iter()
+                    .map(|path| Value::text(path.display().to_string()))
+                    .collect(),
+            ),
+        ),
+    ])
+    .render()
+}
+
+/// Der Name einer Rolle im JSON. Englisch und stabil, wie in [`crate::report`].
+fn role_name(role: ferrite_format::superblock::Role) -> &'static str {
+    use ferrite_format::superblock::Role;
+    match role {
+        Role::Data => "data",
+        Role::ParityP => "parity-p",
+        Role::ParityQ => "parity-q",
+        Role::Log => "log",
+    }
+}
+
 pub fn scan(directories: &[PathBuf]) -> Scan {
     use ferrite_engine::{read_superblock, MemberDevice};
 

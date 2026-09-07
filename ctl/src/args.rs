@@ -51,6 +51,7 @@ pub enum Command {
     /// Das Betriebstagebuch auswerten.
     Journal {
         config: Option<PathBuf>,
+        json: bool,
     },
     Help,
     Version,
@@ -60,6 +61,7 @@ pub enum Command {
 pub struct DiscoverRequest {
     /// Wo gesucht wird. Leer heisst: was in der Konfiguration steht.
     pub scan: Vec<PathBuf>,
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +155,12 @@ pub struct StatusRequest {
     pub devices: Vec<PathBuf>,
     /// Woher die Konfiguration kommt, wenn die Liste leer ist.
     pub config: Option<PathBuf>,
+    /// Maschinenlesbar statt gesetzt.
+    ///
+    /// Der Text ist fuer Menschen und darf sich aendern; wer ihn zerlegt,
+    /// bricht beim ersten neuen Wort. Mit `--json` gibt es dieselben Zahlen
+    /// in einer Form, auf die sich jemand verlassen darf.
+    pub json: bool,
 }
 
 /// Warum eine Kommandozeile nicht benutzbar ist.
@@ -230,26 +238,54 @@ pub fn parse(arguments: &[String]) -> Result<Command, ArgError> {
             Ok(Command::CheckFlush(StatusRequest {
                 devices,
                 config: None,
+                json: false,
             }))
         }
-        "discover" => Ok(Command::Discover(DiscoverRequest {
-            scan: rest.iter().map(PathBuf::from).collect(),
-        })),
-        "journal" => match rest.first().map(String::as_str) {
-            None => Ok(Command::Journal { config: None }),
-            Some("--config") => {
-                let value = rest
-                    .get(1)
-                    .ok_or_else(|| ArgError::MissingValue("--config".to_string()))?;
-                Ok(Command::Journal {
-                    config: Some(PathBuf::from(value)),
-                })
+        "discover" => {
+            let json = rest.iter().any(|argument| argument == "--json");
+            let scan: Vec<PathBuf> = rest
+                .iter()
+                .filter(|argument| !argument.starts_with("--"))
+                .map(PathBuf::from)
+                .collect();
+            if let Some(other) = rest
+                .iter()
+                .find(|argument| argument.starts_with("--") && *argument != "--json")
+            {
+                return Err(ArgError::UnknownOption {
+                    command: "discover",
+                    option: other.to_string(),
+                });
             }
-            Some(other) => Err(ArgError::UnknownOption {
-                command: "journal",
-                option: other.to_string(),
-            }),
-        },
+            Ok(Command::Discover(DiscoverRequest { scan, json }))
+        }
+        "journal" => {
+            let mut config = None;
+            let mut json = false;
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--config" => {
+                        let value = rest
+                            .get(index + 1)
+                            .ok_or_else(|| ArgError::MissingValue("--config".to_string()))?;
+                        config = Some(PathBuf::from(value));
+                        index += 2;
+                    }
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
+                    other => {
+                        return Err(ArgError::UnknownOption {
+                            command: "journal",
+                            option: other.to_string(),
+                        })
+                    }
+                }
+            }
+            Ok(Command::Journal { config, json })
+        }
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
         other => Err(ArgError::UnknownCommand(other.to_string())),
@@ -569,6 +605,7 @@ fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
     // status` ohne Argumente auf und will keine Geraeteliste pflegen.
     let mut devices: Vec<PathBuf> = Vec::new();
     let mut config: Option<PathBuf> = None;
+    let mut json = false;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -581,6 +618,11 @@ fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
             index += 2;
             continue;
         }
+        if argument == "--json" {
+            json = true;
+            index += 1;
+            continue;
+        }
         if argument.starts_with("--") {
             return Err(ArgError::UnknownOption {
                 command: "status",
@@ -590,7 +632,11 @@ fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
         devices.push(PathBuf::from(argument));
         index += 1;
     }
-    Ok(Command::Status(StatusRequest { devices, config }))
+    Ok(Command::Status(StatusRequest {
+        devices,
+        config,
+        json,
+    }))
 }
 
 /// Kein Geraet darf zweimal vorkommen.
@@ -648,13 +694,18 @@ ferrite — Werkzeug fuer ein Ferrite-Array
         --parity-q verdoppelt die Redundanz: Damit ueberlebt das Array zwei
         gleichzeitig ausgefallene Datenplatten statt einer.
 
-    ferrite status <GERAET> [<GERAET> ...]
+    ferrite status <GERAET> [<GERAET> ...] [--json]
 
         Liest die Superbloecke der angegebenen Geraete und zeigt, was sie
         zusammen ergeben. Beschreibt nichts.
 
         Rueckgabewert: 0 alles in Ordnung, 1 das Array laeuft degradiert,
         2 es laesst sich so nicht zusammensetzen.
+
+        --json gibt dieselben Zahlen maschinenlesbar aus, Groessen in Bytes.
+        Der Text daneben ist fuer Menschen gesetzt und darf sich aendern; wer
+        ihn zerlegt, bricht beim ersten neuen Wort. Der Rueckgabewert ist in
+        beiden Faellen derselbe.
 
     ferrite run <GERAET> [<GERAET> ...]
                 [--pool <VERZEICHNIS>] [--state-dir /run/ferrite]
@@ -706,7 +757,7 @@ ferrite — Werkzeug fuer ein Ferrite-Array
         Fortschritt steht im Superblock: Ein Abbruch kostet hoechstens
         einen Durchgang, danach geht es dort weiter, wo es aufgehoert hat.
 
-    ferrite discover [<VERZEICHNIS> ...]
+    ferrite discover [<VERZEICHNIS> ...] [--json]
 
         Zeigt, welche Ferrite-Arrays angeschlossen sind. Ohne Angabe wird
         gesucht, wo die Konfiguration es sagt — voreingestellt in
@@ -725,7 +776,7 @@ ferrite — Werkzeug fuer ein Ferrite-Array
 
         Schreibt nichts.
 
-    ferrite journal [--config <DATEI>]
+    ferrite journal [--config <DATEI>] [--json]
 
         Wertet das Betriebstagebuch aus: wieviele Stunden, wieviele Scrubs,
         wieviel Bit-Rot repariert — und die beiden Zahlen, um die es geht:
@@ -953,6 +1004,70 @@ mod tests {
     }
 
     #[test]
+    fn json_is_a_flag_on_every_command_that_reports() {
+        // Eine Oberflaeche ruft genau diese drei auf. Faellt eines der
+        // Flaggen weg, sieht sie einen Bedienfehler statt einer Antwort.
+        for line in [
+            vec!["status", "--json"],
+            vec!["status", "--json", "/dev/a"],
+            vec!["status", "/dev/a", "--json"],
+            vec!["discover", "--json"],
+            vec!["discover", "--json", "/dev/disk/by-id"],
+            vec!["journal", "--json"],
+            vec!["journal", "--json", "--config", "/etc/ferrite/ferrite.conf"],
+        ] {
+            let parsed = parse(&args(&line));
+            assert!(parsed.is_ok(), "{line:?} wurde abgelehnt: {parsed:?}");
+            let json = match parsed.expect("oben geprueft") {
+                Command::Status(request) => request.json,
+                Command::Discover(request) => request.json,
+                Command::Journal { json, .. } => json,
+                other => panic!("{line:?} ergab {other:?}"),
+            };
+            assert!(json, "{line:?} hat --json nicht gesetzt");
+        }
+    }
+
+    #[test]
+    fn without_the_flag_nothing_is_json() {
+        for line in [vec!["status"], vec!["discover"], vec!["journal"]] {
+            let json = match parse(&args(&line)).expect("gueltig") {
+                Command::Status(request) => request.json,
+                Command::Discover(request) => request.json,
+                Command::Journal { json, .. } => json,
+                other => panic!("{line:?} ergab {other:?}"),
+            };
+            assert!(!json, "{line:?} war ungefragt JSON");
+        }
+    }
+
+    #[test]
+    fn discover_still_rejects_an_option_it_does_not_know() {
+        // Beim Umbau auf `--json` waere es leicht gewesen, jede Option
+        // durchzulassen. Ein Tippfehler wuerde dann still ignoriert.
+        assert_eq!(
+            parse(&args(&["discover", "--jsonn"])),
+            Err(ArgError::UnknownOption {
+                command: "discover",
+                option: "--jsonn".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_directory_named_after_a_flag_still_arrives() {
+        // `--json` wird herausgefiltert, alles andere bleibt ein Verzeichnis.
+        let parsed = parse(&args(&["discover", "/dev/disk/by-id", "--json"]));
+        assert_eq!(
+            parsed,
+            Ok(Command::Discover(DiscoverRequest {
+                scan: vec![PathBuf::from("/dev/disk/by-id")],
+                json: true,
+            }))
+        );
+    }
+
+    #[test]
     fn status_takes_its_devices_as_plain_arguments() {
         let line = args(&["status", "/dev/a", "/dev/b"]);
         assert_eq!(
@@ -960,6 +1075,7 @@ mod tests {
             Ok(Command::Status(StatusRequest {
                 devices: vec![PathBuf::from("/dev/a"), PathBuf::from("/dev/b")],
                 config: None,
+                json: false,
             }))
         );
     }
@@ -973,6 +1089,7 @@ mod tests {
             Ok(Command::Status(StatusRequest {
                 devices: Vec::new(),
                 config: None,
+                json: false,
             }))
         );
     }

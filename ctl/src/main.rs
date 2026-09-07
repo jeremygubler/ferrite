@@ -41,7 +41,7 @@ fn main() -> ExitCode {
         Command::Rebuild(request) => execute_rebuild(&request),
         Command::CheckFlush(request) => execute_check_flush(&request.devices),
         Command::Discover(request) => execute_discover(&request),
-        Command::Journal { config } => execute_journal(config.as_deref()),
+        Command::Journal { config, json } => execute_journal(config.as_deref(), json),
     }
 }
 
@@ -65,6 +65,15 @@ fn execute_create(plan: &ferrite_ctl::CreatePlan) -> ExitCode {
 
 #[cfg(unix)]
 fn execute_status(request: &ferrite_ctl::args::StatusRequest) -> ExitCode {
+    // Der Rueckgabewert haengt nicht an der Darstellung: Ein Ueberwachungs-
+    // skript, das auf `--json` umstellt, soll nicht ploetzlich andere Werte
+    // sehen.
+    if request.json {
+        let (text, health) =
+            ferrite_ctl::run::status_json(&request.devices, request.config.as_deref());
+        println!("{text}");
+        return ExitCode::from(health.exit_code());
+    }
     let report = ferrite_ctl::run::status(&request.devices, request.config.as_deref());
     print!("{}", report.text);
     ExitCode::from(report.health.exit_code())
@@ -184,6 +193,17 @@ fn execute_discover(request: &ferrite_ctl::args::DiscoverRequest) -> ExitCode {
     };
 
     let scan = ferrite_ctl::discover::scan(&directories);
+
+    if request.json {
+        println!("{}", ferrite_ctl::discover::scan_json(&scan, &directories));
+        // Auch hier bleibt der Rueckgabewert derselbe: nichts gefunden ist 1.
+        return if scan.arrays.is_empty() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+
     if scan.arrays.is_empty() {
         println!(
             "Kein Ferrite-Array gefunden. Gesucht wurde in:\n  {}",
@@ -235,7 +255,7 @@ fn execute_discover(_request: &ferrite_ctl::args::DiscoverRequest) -> ExitCode {
 }
 
 #[cfg(unix)]
-fn execute_journal(config: Option<&std::path::Path>) -> ExitCode {
+fn execute_journal(config: Option<&std::path::Path>, json: bool) -> ExitCode {
     let config = match ferrite_ctl::run::load_config(config) {
         Ok(config) => config,
         Err(error) => {
@@ -254,7 +274,11 @@ fn execute_journal(config: Option<&std::path::Path>) -> ExitCode {
 
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let summary = ferrite_ctl::journal::summarize(&text);
-    print!("{}", ferrite_ctl::journal::render(&summary));
+    if json {
+        println!("{}", ferrite_ctl::journal::summary_json(&summary));
+    } else {
+        print!("{}", ferrite_ctl::journal::render(&summary));
+    }
 
     // Wie bei `status`: Die Zahl sagt, ob jemand hinsehen muss.
     if summary.needs_attention() {
@@ -265,7 +289,7 @@ fn execute_journal(config: Option<&std::path::Path>) -> ExitCode {
 }
 
 #[cfg(not(unix))]
-fn execute_journal(_config: Option<&std::path::Path>) -> ExitCode {
+fn execute_journal(_config: Option<&std::path::Path>, _json: bool) -> ExitCode {
     eprintln!("ferrite journal braucht ein System mit Blockgeraeten.");
     ExitCode::from(EXIT_USAGE)
 }

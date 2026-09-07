@@ -36,6 +36,15 @@ pub enum Health {
 }
 
 impl Health {
+    /// Der Name im JSON. Englisch und stabil.
+    pub fn name(self) -> &'static str {
+        match self {
+            Health::Healthy => "healthy",
+            Health::Degraded => "degraded",
+            Health::Broken => "broken",
+        }
+    }
+
     pub fn exit_code(self) -> u8 {
         match self {
             Health::Healthy => 0,
@@ -52,91 +61,176 @@ pub struct Report {
     pub health: Health,
 }
 
-/// Baut den Bericht ueber die angesehenen Geraete.
-pub fn status(seen: &[Seen]) -> Report {
-    let mut text = String::new();
-    let mut health = Health::Healthy;
+/// Was ueber die angesehenen Geraete bekannt ist — ohne Formatierung.
+///
+/// # Warum diese Zwischenstufe
+///
+/// Es gibt zwei Leser: einen Menschen und eine Oberflaeche. Beide brauchen
+/// dieselben Zahlen und vor allem **dieselbe Bewertung** — ein `status`, das
+/// im Text „degradiert" sagt und im JSON `healthy`, waere schlimmer als gar
+/// kein JSON.
+///
+/// Deshalb rechnet [`survey`] einmal, und [`status`] und [`status_json`]
+/// setzen nur noch. Die Textausgabe blieb dabei Byte fuer Byte dieselbe; die
+/// Tests darauf sind der Nachweis, dass die Umstellung nichts verschoben hat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Survey {
+    /// `None`, wenn auf keinem Geraet ein Superblock liegt.
+    pub array: Option<ArrayFacts>,
+    pub members: Vec<MemberFacts>,
+    /// Geraete, die der Aufrufer genannt hat, auf denen aber nichts liegt.
+    pub without_superblock: Vec<String>,
+    /// Geraete aus einem **anderen** Array. Der Fall, in dem jemand die
+    /// Platte eines fremden Pools angeschlossen hat.
+    pub foreign: Vec<(String, String)>,
+    /// Warum sich daraus kein Array machen laesst, falls es so ist.
+    pub cannot_assemble: Option<String>,
+    pub health: Health,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayFacts {
+    pub uuid: String,
+    pub block_size: u64,
+    pub data_slots: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberFacts {
+    pub device: String,
+    pub role: Role,
+    pub slot: u16,
+    pub state: MemberState,
+    pub payload_size: u64,
+    /// Wieviele **Bytes** schon wiederhergestellt sind, waehrend ein Rebuild
+    /// laeuft. `None` sonst.
+    pub rebuilt: Option<u64>,
+}
+
+/// Sieht die Geraete an und bewertet sie.
+pub fn survey(seen: &[Seen]) -> Survey {
     let superblocks: Vec<Superblock> = seen
         .iter()
         .filter_map(|entry| entry.superblock.clone())
         .collect();
 
+    let without_superblock: Vec<String> = seen
+        .iter()
+        .filter(|entry| entry.superblock.is_none())
+        .map(|entry| entry.device.clone())
+        .collect();
+
     if superblocks.is_empty() {
-        text.push_str("Auf keinem der angegebenen Geraete liegt ein Ferrite-Superblock.\n");
-        return Report {
-            text,
+        return Survey {
+            array: None,
+            members: Vec::new(),
+            without_superblock,
+            foreign: Vec::new(),
+            cannot_assemble: None,
             health: Health::Broken,
         };
     }
 
-    // Geraete ohne Superblock sind kein Fehler des Arrays, aber der Aufrufer
-    // hat sie genannt und soll erfahren, dass sie nicht dazugehoeren.
-    for entry in seen.iter().filter(|entry| entry.superblock.is_none()) {
-        text.push_str(&format!(
-            "  {}: kein Ferrite-Superblock — gehoert nicht dazu\n",
-            entry.device
-        ));
-    }
-
     let first = &superblocks[0];
-    text.push_str(&format!(
-        "Array {}\n  Blockgroesse {}, {} Data-Slots\n",
-        first.array_uuid,
-        size(first.parity_block_size()),
-        first.data_slot_count
-    ));
+    let mut health = Health::Healthy;
+    let mut members = Vec::new();
+    let mut foreign = Vec::new();
 
-    let mut rows: Vec<(u8, u16, String)> = Vec::new();
     for entry in seen {
         let Some(superblock) = &entry.superblock else {
             continue;
         };
-        // Ein Superblock aus einem **anderen** Array. Das ist der Fall, in dem
-        // jemand die Platte eines fremden Pools angeschlossen hat, und er
-        // gehoert deutlich gemeldet: Wer ihn uebersieht, nimmt sie versehentlich
-        // in dieses Array auf.
         if superblock.array_uuid != first.array_uuid {
             health = health.max(Health::Broken);
-            rows.push((
-                4,
-                0,
-                format!(
-                    "  {}: gehoert zu Array {} — nicht zu diesem\n",
-                    entry.device, superblock.array_uuid
-                ),
-            ));
+            foreign.push((entry.device.clone(), superblock.array_uuid.to_string()));
             continue;
         }
-
-        let state = state_of(superblock);
         if superblock.role == Role::Data && superblock.member_state != MemberState::Clean {
             health = health.max(Health::Degraded);
         }
-        rows.push((
-            order_of(superblock.role),
-            superblock.slot_index,
-            format!(
-                "  {:<9} {:<20} {:<24} {}\n",
-                name_of(superblock),
-                entry.device,
-                state,
-                size(superblock.payload_size)
-            ),
+        members.push(MemberFacts {
+            device: entry.device.clone(),
+            role: superblock.role,
+            slot: superblock.slot_index,
+            state: superblock.member_state,
+            payload_size: superblock.payload_size,
+            rebuilt: (superblock.member_state == MemberState::Rebuilding)
+                .then(|| superblock.rebuild_progress.min(superblock.payload_size)),
+        });
+    }
+    members.sort_by_key(|member| (order_of(member.role), member.slot));
+
+    // Die Frage, die der Aufrufer wirklich hat: Laesst sich daraus ein Array
+    // machen? `assemble` ist dieselbe Pruefung, die auch das Oeffnen macht —
+    // hier wird nichts nachgebaut.
+    let cannot_assemble = match assemble(&superblocks) {
+        Ok(_) => None,
+        Err(error) => {
+            health = Health::Broken;
+            Some(error.to_string())
+        }
+    };
+
+    Survey {
+        array: Some(ArrayFacts {
+            uuid: first.array_uuid.to_string(),
+            block_size: first.parity_block_size(),
+            data_slots: first.data_slot_count,
+        }),
+        members,
+        without_superblock,
+        foreign,
+        cannot_assemble,
+        health,
+    }
+}
+
+/// Baut den Bericht ueber die angesehenen Geraete.
+pub fn status(seen: &[Seen]) -> Report {
+    let survey = survey(seen);
+    let mut text = String::new();
+
+    let Some(array) = &survey.array else {
+        text.push_str("Auf keinem der angegebenen Geraete liegt ein Ferrite-Superblock.\n");
+        return Report {
+            text,
+            health: survey.health,
+        };
+    };
+
+    // Geraete ohne Superblock sind kein Fehler des Arrays, aber der Aufrufer
+    // hat sie genannt und soll erfahren, dass sie nicht dazugehoeren.
+    for device in &survey.without_superblock {
+        text.push_str(&format!(
+            "  {device}: kein Ferrite-Superblock — gehoert nicht dazu\n"
         ));
     }
 
-    rows.sort_by_key(|(role, slot, _)| (*role, *slot));
-    for (_, _, line) in rows {
-        text.push_str(&line);
+    text.push_str(&format!(
+        "Array {}\n  Blockgroesse {}, {} Data-Slots\n",
+        array.uuid,
+        size(array.block_size),
+        array.data_slots
+    ));
+
+    for member in &survey.members {
+        text.push_str(&format!(
+            "  {:<9} {:<20} {:<24} {}\n",
+            name_of(member.role, member.slot),
+            member.device,
+            state_of(member, array.block_size),
+            size(member.payload_size)
+        ));
+    }
+    for (device, uuid) in &survey.foreign {
+        text.push_str(&format!(
+            "  {device}: gehoert zu Array {uuid} — nicht zu diesem\n"
+        ));
     }
 
-    // Und zum Schluss die Frage, die der Aufrufer wirklich hat: Laesst sich
-    // daraus ein Array machen? `assemble` ist dieselbe Pruefung, die auch das
-    // Oeffnen macht — hier wird nichts nachgebaut.
-    match assemble(&superblocks) {
-        Ok(_) => {
-            let summary = match health {
+    match &survey.cannot_assemble {
+        None => {
+            let summary = match survey.health {
                 Health::Healthy => "Alle Members in Ordnung.",
                 Health::Degraded => {
                     "Das Array laeuft degradiert: mindestens ein Member traegt keine gueltigen \
@@ -147,8 +241,7 @@ pub fn status(seen: &[Seen]) -> Report {
             };
             text.push_str(&format!("\n{summary}\n"));
         }
-        Err(error) => {
-            health = Health::Broken;
+        Some(error) => {
             text.push_str(&format!(
                 "\nDiese Geraete ergeben kein Array: {error}\n\
                  Fehlt eine Platte in der Liste, oder ist sie ausgefallen?\n"
@@ -156,13 +249,119 @@ pub fn status(seen: &[Seen]) -> Report {
         }
     }
 
-    Report { text, health }
+    Report {
+        text,
+        health: survey.health,
+    }
+}
+
+/// Derselbe Bericht als JSON.
+///
+/// Groessen stehen in **Bytes** und nicht als „62,9 MiB": Wer sie anzeigen
+/// will, rundet selbst; wer sie vergleichen will, kann es. `rebuilt` ist
+/// ebenfalls in Bytes — dieselbe Einheit wie im Superblock, damit die
+/// Verwechslung mit Bloecken hier gar nicht erst moeglich ist.
+pub fn status_json(seen: &[Seen]) -> String {
+    use crate::json::Value;
+
+    let survey = survey(seen);
+    let mut fields: Vec<(&str, Value)> = Vec::new();
+
+    match &survey.array {
+        Some(array) => {
+            fields.push(("array", Value::text(&array.uuid)));
+            fields.push(("block_size", Value::Number(array.block_size)));
+            fields.push(("data_slots", Value::Number(u64::from(array.data_slots))));
+        }
+        None => {
+            fields.push(("array", Value::Null));
+            fields.push(("block_size", Value::Null));
+            fields.push(("data_slots", Value::Null));
+        }
+    }
+
+    fields.push(("health", Value::text(survey.health.name())));
+    fields.push(("exit_code", Value::Number(survey.health.exit_code() as u64)));
+
+    fields.push((
+        "members",
+        Value::List(
+            survey
+                .members
+                .iter()
+                .map(|member| {
+                    Value::object(vec![
+                        ("device", Value::text(&member.device)),
+                        ("role", Value::text(role_name(member.role))),
+                        ("slot", Value::Number(member.slot as u64)),
+                        ("state", Value::text(state_name(member.state))),
+                        ("size", Value::Number(member.payload_size)),
+                        (
+                            "rebuilt",
+                            match member.rebuilt {
+                                Some(bytes) => Value::Number(bytes),
+                                None => Value::Null,
+                            },
+                        ),
+                    ])
+                })
+                .collect(),
+        ),
+    ));
+
+    fields.push((
+        "without_superblock",
+        Value::List(survey.without_superblock.iter().map(Value::text).collect()),
+    ));
+    fields.push((
+        "foreign",
+        Value::List(
+            survey
+                .foreign
+                .iter()
+                .map(|(device, uuid)| {
+                    Value::object(vec![
+                        ("device", Value::text(device)),
+                        ("array", Value::text(uuid)),
+                    ])
+                })
+                .collect(),
+        ),
+    ));
+    fields.push((
+        "cannot_assemble",
+        match &survey.cannot_assemble {
+            Some(reason) => Value::text(reason),
+            None => Value::Null,
+        },
+    ));
+
+    Value::object(fields).render()
+}
+
+/// Der Name einer Rolle im JSON. Englisch und stabil — anders als die Spalte
+/// im Text, die sich aendern darf.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Data => "data",
+        Role::ParityP => "parity-p",
+        Role::ParityQ => "parity-q",
+        Role::Log => "log",
+    }
+}
+
+fn state_name(state: MemberState) -> &'static str {
+    match state {
+        MemberState::Clean => "clean",
+        MemberState::Stale => "stale",
+        MemberState::Rebuilding => "rebuilding",
+    }
 }
 
 /// Wie ein Member in der Liste heisst.
-fn name_of(superblock: &Superblock) -> String {
-    match superblock.role {
-        Role::Data => format!("Slot {}", superblock.slot_index),
+fn name_of(role: Role, slot: u16) -> String {
+    match role {
+        Role::Data => format!("Slot {slot}"),
         Role::ParityP => "ParityP".to_string(),
         Role::ParityQ => "ParityQ".to_string(),
         Role::Log => "Log".to_string(),
@@ -179,24 +378,23 @@ fn order_of(role: Role) -> u8 {
     }
 }
 
-fn state_of(superblock: &Superblock) -> String {
-    match superblock.member_state {
+fn state_of(member: &MemberFacts, block_size: u64) -> String {
+    match member.state {
         MemberState::Clean => "in Ordnung".to_string(),
         MemberState::Stale => "unbrauchbar, wartet auf Rebuild".to_string(),
         MemberState::Rebuilding => {
             // `rebuild_progress` steht in **Bytes**, nicht in Bloecken
             // (Abschnitt 2.1). Wer die Einheit verwechselt, zeigt einen
             // Fortschritt von 0 %, waehrend die halbe Platte schon steht.
-            let block = superblock.parity_block_size();
-            let done = superblock.rebuild_progress.min(superblock.payload_size);
+            let done = member.rebuilt.unwrap_or(0);
             let percent = done
                 .saturating_mul(100)
-                .checked_div(superblock.payload_size)
+                .checked_div(member.payload_size)
                 .unwrap_or(100);
             format!(
                 "Rebuild bei {percent} % ({} von {} Bloecken)",
-                done / block,
-                superblock.payload_size / block
+                done / block_size,
+                member.payload_size / block_size
             )
         }
     }
@@ -330,6 +528,115 @@ mod tests {
             seen("/dev/p", member(Role::ParityP, 0, MemberState::Clean)),
             seen("/dev/l", member(Role::Log, 0, MemberState::Clean)),
         ]
+    }
+
+    // --- JSON --------------------------------------------------------------
+    //
+    // Geprueft wird die Zeichenkette und nicht ein geparster Baum: `ctl/`
+    // traegt keinen JSON-Parser, und einen fuer den Test zu schreiben hiesse,
+    // den Schreiber gegen einen Leser zu pruefen, den sonst niemand benutzt.
+    // Dass die Ausgabe wirklich gueltiges JSON ist, prueft CI mit `jq` am
+    // echten Binary — mit einem Parser, den nicht dieses Projekt geschrieben hat.
+
+    #[test]
+    fn the_json_carries_the_same_verdict_as_the_text() {
+        // Der Fall, der am teuersten waere: Text sagt „degradiert", JSON sagt
+        // „healthy". Eine Oberflaeche zeigt dann gruen, waehrend die Platte
+        // auf ihren Rebuild wartet.
+        let mut degraded = healthy_array();
+        degraded[1] = seen("/dev/b", member(Role::Data, 1, MemberState::Stale));
+
+        for members in [healthy_array(), degraded] {
+            let text = status(&members);
+            let json = status_json(&members);
+            assert!(
+                json.contains(&format!("\"health\":\"{}\"", text.health.name())),
+                "Text sagt {:?}, JSON sagt anders: {json}",
+                text.health
+            );
+            assert!(json.contains(&format!("\"exit_code\":{}", text.health.exit_code())));
+        }
+    }
+
+    #[test]
+    fn the_json_names_the_array_and_every_member() {
+        let json = status_json(&healthy_array());
+        assert!(json.starts_with("{\"array\":\""));
+        assert!(json.contains("\"block_size\":65536"));
+        assert!(json.contains("\"data_slots\":2"));
+        assert!(json.contains("\"device\":\"/dev/a\",\"role\":\"data\",\"slot\":0"));
+        assert!(json.contains("\"device\":\"/dev/p\",\"role\":\"parity-p\""));
+        assert!(json.contains("\"device\":\"/dev/l\",\"role\":\"log\""));
+        // Groessen in Bytes: 8 MiB Payload.
+        assert!(json.contains("\"size\":8388608"));
+        assert!(json.contains("\"state\":\"clean\""));
+        assert!(json.contains("\"rebuilt\":null"));
+        assert!(json.contains("\"cannot_assemble\":null"));
+    }
+
+    #[test]
+    fn a_rebuild_reports_its_bytes_and_not_a_percentage() {
+        // Prozente rechnet die Oberflaeche selbst. Was hier steht, ist die
+        // Zahl aus dem Superblock — in derselben Einheit, damit die
+        // Verwechslung mit Bloecken gar nicht erst moeglich ist.
+        let mut rebuilding = member(Role::Data, 1, MemberState::Rebuilding);
+        rebuilding.rebuild_progress = 2 << 20;
+        let mut members = healthy_array();
+        members[1] = seen("/dev/b", rebuilding);
+
+        let json = status_json(&members);
+        assert!(json.contains("\"state\":\"rebuilding\",\"size\":8388608,\"rebuilt\":2097152"));
+    }
+
+    #[test]
+    fn a_device_without_a_superblock_is_named_and_not_swallowed() {
+        let mut members = healthy_array();
+        members.push(Seen {
+            device: "/dev/fremd".to_string(),
+            superblock: None,
+        });
+        let json = status_json(&members);
+        assert!(json.contains("\"without_superblock\":[\"/dev/fremd\"]"));
+    }
+
+    #[test]
+    fn a_member_of_another_array_shows_up_under_foreign() {
+        let mut other = member(Role::Data, 0, MemberState::Clean);
+        other.array_uuid = Uuid::from_random_bytes([0xB2; 16]);
+        let mut members = healthy_array();
+        members.push(seen("/dev/fremd", other));
+
+        let json = status_json(&members);
+        assert!(json.contains("\"device\":\"/dev/fremd\",\"array\":\""));
+        assert!(json.contains("\"health\":\"broken\""));
+    }
+
+    #[test]
+    fn nothing_found_is_an_object_and_not_an_empty_output() {
+        // Eine Oberflaeche, die hier eine leere Zeile bekaeme, zeigte eine
+        // leere Seite und sagte nicht warum.
+        let json = status_json(&[Seen {
+            device: "/dev/leer".to_string(),
+            superblock: None,
+        }]);
+        assert!(json.contains("\"array\":null"));
+        assert!(json.contains("\"health\":\"broken\""));
+        assert!(json.contains("\"members\":[]"));
+        assert!(json.contains("\"without_superblock\":[\"/dev/leer\"]"));
+    }
+
+    #[test]
+    fn a_quote_in_a_device_name_does_not_break_the_json() {
+        // Der Pfad kommt aus /dev/disk/by-id und traegt, was im Typenschild
+        // steht. Ohne Escaping stuende hier kaputtes JSON und die Oberflaeche
+        // zeigte nichts.
+        let mut members = healthy_array();
+        members[0] = seen(
+            "/dev/disk/by-id/ata-\"WD\"",
+            member(Role::Data, 0, MemberState::Clean),
+        );
+        let json = status_json(&members);
+        assert!(json.contains("ata-\\\"WD\\\""), "{json}");
     }
 
     #[test]

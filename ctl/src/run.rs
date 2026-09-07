@@ -270,6 +270,56 @@ pub fn status(devices: &[PathBuf], named: Option<&Path>) -> Report {
     report::status(&seen)
 }
 
+/// Derselbe Zustand als JSON, samt der Bewertung fuer den Rueckgabewert.
+///
+/// # Warum die Fehlerfaelle auch JSON sind
+///
+/// Eine Oberflaeche, die bei „Konfiguration nicht lesbar" statt einer Antwort
+/// einen deutschen Satz bekommt, zeigt eine leere Seite und sagt nicht warum.
+/// Deshalb wird auch das Scheitern als Objekt geliefert — mit `error` gefuellt
+/// und `health` auf `broken`.
+pub fn status_json(devices: &[PathBuf], named: Option<&Path>) -> (String, crate::report::Health) {
+    use crate::json::Value;
+    use crate::report::Health;
+
+    let broken = |error: String| {
+        (
+            Value::object(vec![
+                ("array", Value::Null),
+                ("health", Value::text("broken")),
+                (
+                    "exit_code",
+                    Value::Number(u64::from(Health::Broken.exit_code())),
+                ),
+                ("members", Value::List(Vec::new())),
+                ("error", Value::text(error)),
+            ])
+            .render(),
+            Health::Broken,
+        )
+    };
+
+    let config = match load_config(named) {
+        Ok(config) => config,
+        Err(error) => return broken(error.to_string()),
+    };
+    let devices = match devices_or_search(devices, &config) {
+        Ok(devices) => devices,
+        Err(error) => return broken(error.to_string()),
+    };
+
+    let seen: Vec<Seen> = devices
+        .iter()
+        .map(|path| Seen {
+            device: path.display().to_string(),
+            superblock: MemberDevice::open_read_only(path)
+                .ok()
+                .and_then(|device| read_superblock(&device).ok()),
+        })
+        .collect();
+    (report::status_json(&seen), report::survey(&seen).health)
+}
+
 // --- Umgebung -------------------------------------------------------------
 
 /// Sechzehn Bytes aus dem Zufallsgenerator des Betriebssystems.

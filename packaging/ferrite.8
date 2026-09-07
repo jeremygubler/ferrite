@@ -23,13 +23,18 @@ ferrite \(em Werkzeug fuer ein Ferrite\-Array
         \-\-parity\-q verdoppelt die Redundanz: Damit ueberlebt das Array zwei
         gleichzeitig ausgefallene Datenplatten statt einer.
 
-    ferrite status <GERAET> [<GERAET> ...]
+    ferrite status <GERAET> [<GERAET> ...] [\-\-json]
 
         Liest die Superbloecke der angegebenen Geraete und zeigt, was sie
         zusammen ergeben. Beschreibt nichts.
 
         Rueckgabewert: 0 alles in Ordnung, 1 das Array laeuft degradiert,
         2 es laesst sich so nicht zusammensetzen.
+
+        \-\-json gibt dieselben Zahlen maschinenlesbar aus, Groessen in Bytes.
+        Der Text daneben ist fuer Menschen gesetzt und darf sich aendern; wer
+        ihn zerlegt, bricht beim ersten neuen Wort. Der Rueckgabewert ist in
+        beiden Faellen derselbe.
 
     ferrite run <GERAET> [<GERAET> ...]
                 [\-\-pool <VERZEICHNIS>] [\-\-state\-dir /run/ferrite]
@@ -81,7 +86,7 @@ ferrite \(em Werkzeug fuer ein Ferrite\-Array
         Fortschritt steht im Superblock: Ein Abbruch kostet hoechstens
         einen Durchgang, danach geht es dort weiter, wo es aufgehoert hat.
 
-    ferrite discover [<VERZEICHNIS> ...]
+    ferrite discover [<VERZEICHNIS> ...] [\-\-json]
 
         Zeigt, welche Ferrite\-Arrays angeschlossen sind. Ohne Angabe wird
         gesucht, wo die Konfiguration es sagt \(em voreingestellt in
@@ -100,7 +105,7 @@ ferrite \(em Werkzeug fuer ein Ferrite\-Array
 
         Schreibt nichts.
 
-    ferrite journal [\-\-config <DATEI>]
+    ferrite journal [\-\-config <DATEI>] [\-\-json]
 
         Wertet das Betriebstagebuch aus: wieviele Stunden, wieviele Scrubs,
         wieviel Bit\-Rot repariert \(em und die beiden Zahlen, um die es geht:
