@@ -30,6 +30,8 @@ pub mod config;
 /// mit Blockgeraeten, das Ordnen der Fundstellen nicht.
 pub mod discover;
 pub mod journal;
+/// Die Handbuchseite, erzeugt aus derselben Quelle wie die Hilfe.
+pub mod man;
 /// Scrub, Ersatz und Rebuild. Braucht Geraete, aber weder ublk noch FUSE.
 #[cfg(unix)]
 pub mod repair;

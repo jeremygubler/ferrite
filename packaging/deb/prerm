@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+case "$1" in
+remove | deconfigure)
+    # Anhalten, solange das Programm noch da ist: `ferrite run` baut auf
+    # SIGTERM den Pool ab, dann die Members, dann die Blockgeraete. Erst das
+    # Binary zu entfernen und dann zu stoppen liesse ein ublk-Geraet stehen,
+    # das niemand mehr abbauen kann.
+    #
+    # `deb-systemd-invoke` und nicht `systemctl`: In einer Chroot oder einem
+    # Container, in dem `policy-rc.d` das Anfassen von Diensten verbietet,
+    # haelt sich das eine daran und das andere nicht.
+    if [ -d /run/systemd/system ]; then
+        if command -v deb-systemd-invoke >/dev/null; then
+            deb-systemd-invoke stop ferrite-scrub.timer ferrite.service >/dev/null 2>&1 || true
+        else
+            systemctl stop ferrite-scrub.timer ferrite.service >/dev/null 2>&1 || true
+        fi
+    fi
+    ;;
+upgrade | failed-upgrade) ;;
+*)
+    echo "prerm: unbekanntes Argument $1" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

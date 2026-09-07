@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+case "$1" in
+configure)
+    # Nur neu einlesen. **Kein enable, kein start.** Wer ferrite.service
+    # startet, uebergibt Blockgeraete an ublk und haengt Dateisysteme ein — das
+    # gehoert entschieden und nicht mitinstalliert. Ein Paket, das beim
+    # Auspacken die Platten uebernimmt, hat sich diese Entscheidung angemasst.
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+
+    # Nur bei der ersten Installation. Bei jedem Upgrade dasselbe zu sagen
+    # lehrt das Ueberlesen.
+    if [ -z "${2:-}" ]; then
+        cat <<'HINWEIS'
+
+Ferrite ist installiert, laeuft aber noch nicht.
+
+  1. /etc/ferrite/ferrite.conf pruefen — vor allem `scan`, `pool`
+     und `journal`.
+  2. Array anlegen:   ferrite create --data ... --parity-p ... --log ...
+     (zeigt nur den Plan; erst --yes schreibt)
+  3. Einschalten:     systemctl enable --now ferrite.service
+                      systemctl enable --now ferrite-scrub.timer
+
+`man 8 ferrite` sagt den Rest.
+
+HINWEIS
+    fi
+    ;;
+abort-upgrade | abort-remove | abort-deconfigure) ;;
+*)
+    echo "postinst: unbekanntes Argument $1" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

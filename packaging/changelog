@@ -1,0 +1,12 @@
+ferrite (0.1.0) unstable; urgency=medium
+
+  * Erste Paketierung. Paritaets-Array ueber gleiche Offsets, Write-Log mit
+    Recovery, Rekonstruktion aus P und Q, Selbstheilung bei Bit-Rot ueber die
+    Scrub-Meldungen von btrfs.
+  * Vereinigter Pool ueber FUSE mit Passthrough, erweiterten Attributen und
+    POSIX-ACLs.
+  * Das Werkzeug `ferrite`: create, status, run, scrub, replace, rebuild,
+    discover, check-flush, journal.
+  * Kein Dienst wird bei der Installation eingeschaltet.
+
+ -- Jeremy Gubler <gubler.jeremy@gmail.com>  Mon, 07 Sep 2026 00:00:00 +0000

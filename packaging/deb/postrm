@@ -1,0 +1,39 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+case "$1" in
+remove | purge)
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+case "$1" in
+purge)
+    # Erst beim purge werden die Verknuepfungen aufgeraeumt, die ein
+    # `enable` angelegt hat — bei `remove` gehoeren sie stehen zu bleiben,
+    # damit eine Neuinstallation den Dienst wiederfindet, wie er war.
+    if command -v deb-systemd-helper >/dev/null; then
+        for unit in ferrite.service ferrite-scrub.service ferrite-scrub.timer; do
+            deb-systemd-helper purge "$unit" >/dev/null 2>&1 || true
+            deb-systemd-helper unmask "$unit" >/dev/null 2>&1 || true
+        done
+    fi
+    # Die Konffile nimmt dpkg selbst mit. Das Betriebstagebuch bleibt: Es ist
+    # das Einzige, was ein Jahr Betrieb belegt, und ein `apt purge` ist keine
+    # Aussage darueber, dass es weg soll.
+    rmdir /etc/ferrite 2>/dev/null || true
+    ;;
+esac
+
+case "$1" in
+remove | purge | upgrade | failed-upgrade | abort-install | abort-upgrade | disappear) ;;
+*)
+    echo "postrm: unbekanntes Argument $1" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

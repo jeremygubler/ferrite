@@ -269,11 +269,56 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`: 41 Tests an einem echt eingehängten Pool, in CI — 5 für den Passthrough, 5 für erweiterte Attribute, 5 für POSIX-ACLs und 3 für Sperren, jeweils samt Gegenprobe mit abgeschalteter Aushandlung |
-| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. systemd-Units in `packaging/`. Daemon und Web-UI offen |
+| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Paketierung in `packaging/`: `.deb` und `.rpm` von Hand, systemd-Units, eine aus der Hilfe erzeugte Handbuchseite und 9 Tests gegen das Auseinanderlaufen der Pfade — das `.deb` wird in CI installiert und danach benutzt. Daemon und Web-UI offen |
 
 ```
 cargo test
 ```
+
+## Installieren
+
+Debian und Ubuntu — das Paket wird in CI gebaut, **installiert und benutzt**,
+nicht nur gebaut:
+
+```bash
+cargo build --release -p ferrite-ctl
+packaging/build-deb.sh target/release/ferrite
+sudo apt install ./target/packages/ferrite_*.deb
+```
+
+Danach liegt `ferrite` unter `/usr/bin`, die Konfiguration unter
+`/etc/ferrite/ferrite.conf`, und `man 8 ferrite` beantwortet den Rest. Ein
+`.rpm` baut `packaging/build-rpm.sh` daneben; es wird in CI gebaut und sein
+Inhalt gegen das `.deb` gehalten, aber nicht installiert — dafür fehlt der CI
+eine Distribution, die es annimmt. Mehr Zusage steht hier nicht.
+
+**Das Paket schaltet nichts ein.** Wer `ferrite.service` startet, übergibt
+Blockgeräte an ublk und hängt Dateisysteme ein; das gehört entschieden und
+nicht mitinstalliert. Ein Paket, das beim Auspacken die Platten übernimmt, hat
+sich diese Entscheidung angemasst. Erst also die Konfiguration ansehen, dann
+ein Array anlegen, dann:
+
+```bash
+sudo systemctl enable --now ferrite.service
+sudo systemctl enable --now ferrite-scrub.timer
+```
+
+Der Scrub-Timer läuft monatlich und **ohne `--repair`**: Ein Zeitplan, der von
+selbst Parität neu bildet, überschriebe eine veraltete Parität auch dann, wenn
+die Ursache noch da ist. Erst ansehen, dann entscheiden.
+
+Was das Paket sonst noch mitbringt: eine Datei unter
+`/usr/lib/modules-load.d`, damit `ublk_drv` und `fuse` beim Hochfahren geladen
+sind, und `/var/lib/ferrite` für das Betriebstagebuch. Die Konfiguration ist
+eine Conffile — ein `apt upgrade` fasst sie nicht an, und ein Test in CI ändert
+sie und installiert neu, um genau das zu zeigen.
+
+Die Handbuchseite wird nicht neben der Hilfe gepflegt, sondern aus ihr erzeugt;
+`ctl/tests/packaging.rs` hält die eingecheckte Datei gegen den Generator und
+prüft ausserdem, dass die systemd-Units auf den Pfad zeigen, an den das Paket
+das Programm wirklich legt. Das ist die Klasse Fehler, die sonst erst auf der
+Zielmaschine auffällt: Alles baut, alles installiert sich, und der Dienst
+startet nicht.
 
 ## Ausprobieren
 

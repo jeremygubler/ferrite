@@ -352,3 +352,165 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: format/fuzz/artifacts/
           if-no-files-found: ignore
+
+  package:
+    # Ein Paket, das nur gebaut wird, ist ein Paket, von dem niemand weiss, ob
+    # es sich installieren laesst. Dieser Job installiert es auf dem Runner und
+    # benutzt danach das Binary aus /usr/bin — nicht das aus target/.
+    name: Paket (.deb, .rpm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Werkzeuge bereitstellen
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lintian rpm groff-base
+          lintian --version
+          rpmbuild --version
+
+      - name: Release bauen
+        run: cargo build --release -p ferrite-ctl
+
+      - name: Paket bauen
+        id: build
+        run: |
+          DEB=$(packaging/build-deb.sh target/release/ferrite target/packages)
+          RPM=$(packaging/build-rpm.sh target/release/ferrite target/packages)
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+          echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
+          ls -l target/packages
+
+      # `--fail-on error`: Zwei Warnungen bleiben stehen, und beide mit Grund.
+      # `maintainer-script-calls-systemctl` trifft das `daemon-reload` im
+      # postinst (dafuer gibt es keinen dpkg-Trigger) und den Rueckfall im
+      # prerm, falls `deb-systemd-invoke` fehlt. Beide stehen kommentiert im
+      # Skript. Fehler sind etwas anderes und lassen den Job scheitern.
+      - name: lintian
+        run: |
+          lintian --tag-display-limit 0 "${{ steps.build.outputs.deb }}" || true
+          lintian --fail-on error "${{ steps.build.outputs.deb }}"
+
+      - name: Installieren
+        run: sudo apt-get install -y "$PWD/${{ steps.build.outputs.deb }}"
+
+      # Ab hier wird nur noch benutzt, was das Paket abgelegt hat.
+      - name: Was das Paket abgelegt hat
+        run: |
+          dpkg -L ferrite | sort
+          test -x /usr/bin/ferrite
+          test -f /lib/systemd/system/ferrite.service
+          test -f /etc/ferrite/ferrite.conf
+          test -f /usr/lib/modules-load.d/ferrite.conf
+          test -d /var/lib/ferrite
+
+      - name: Das installierte Binary laeuft
+        run: |
+          /usr/bin/ferrite version
+          /usr/bin/ferrite --help > /dev/null
+
+      # Eine Handbuchseite, die roff nicht uebersetzen kann, faellt sonst erst
+      # dem auf, der sie aufschlaegt.
+      - name: Handbuchseite
+        run: |
+          man -w ferrite
+          zcat /usr/share/man/man8/ferrite.8.gz > /tmp/ferrite.8
+          MECKER=$(LC_ALL=C groff -man -z -ww /tmp/ferrite.8 2>&1)
+          if [ -n "$MECKER" ]; then echo "$MECKER"; exit 1; fi
+          echo "groff: sauber"
+
+      - name: systemd-Units
+        run: |
+          systemd-analyze verify /lib/systemd/system/ferrite.service
+          systemd-analyze verify /lib/systemd/system/ferrite-scrub.timer
+          # Verlangt und nicht nur gemeldet: Ein Paket, das beim Auspacken
+          # Blockgeraete uebernimmt, hat sich diese Entscheidung angemasst.
+          for unit in ferrite.service ferrite-scrub.timer; do
+            state=$(systemctl is-enabled "$unit" || true)
+            [ "$state" = disabled ] || { echo "$unit ist $state statt disabled"; exit 1; }
+          done
+
+      # Der eigentliche Nachweis: Das Binary aus dem Paket legt ein Array an
+      # und liest es wieder. Ein `--version`, das laeuft, sagt nur, dass die
+      # Datei nicht leer ist.
+      - name: Ein Array mit dem installierten Werkzeug
+        run: |
+          set -e
+          mkdir -p /tmp/disks /tmp/ferrite-dev
+          for name in d0 d1 p q log; do
+            truncate -s 64M "/tmp/disks/$name.img"
+            dev=$(sudo losetup --find --show "/tmp/disks/$name.img")
+            eval "LOOP_$name=$dev"
+            ln -s "$dev" "/tmp/ferrite-dev/$name"
+          done
+          # `discover` bekommt ein eigenes Verzeichnis mit Verweisen. Es auf
+          # /dev loszulassen hiesse, jeden Knoten dort zu oeffnen — darunter
+          # welche, die beim Lesen blockieren.
+          UUID=$(sudo /usr/bin/ferrite create \
+            --data "$LOOP_d0" --data "$LOOP_d1" \
+            --parity-p "$LOOP_p" --parity-q "$LOOP_q" \
+            --log "$LOOP_log" --label ci-paket --yes \
+            | sed -n 's/^Array \([0-9a-f-]*\) angelegt.*/\1/p')
+          test -n "$UUID" || { echo "create hat keine Array-UUID gemeldet"; exit 1; }
+          sudo /usr/bin/ferrite status "$LOOP_d0" "$LOOP_d1" "$LOOP_p" "$LOOP_q" "$LOOP_log"
+          sudo /usr/bin/ferrite discover /tmp/ferrite-dev | grep -q "$UUID" \
+            || { echo "discover findet das frisch angelegte Array nicht"; exit 1; }
+          for name in d0 d1 p q log; do
+            eval "sudo losetup -d \$LOOP_$name" || true
+          done
+
+      # Der Klassiker unter den Paketfehlern: Das Upgrade setzt die
+      # Konfiguration zurueck, und das Array kommt nach dem naechsten
+      # `apt upgrade` nicht mehr hoch.
+      - name: Die Konfiguration ueberlebt eine Neuinstallation
+        run: |
+          echo "# von CI geaendert" | sudo tee -a /etc/ferrite/ferrite.conf > /dev/null
+          sudo apt-get install -y --reinstall "$PWD/${{ steps.build.outputs.deb }}"
+          grep -q "von CI geaendert" /etc/ferrite/ferrite.conf \
+            || { echo "die Konffile wurde ueberschrieben"; exit 1; }
+
+      - name: Entfernen und purgen
+        run: |
+          sudo apt-get remove -y ferrite
+          test ! -e /usr/bin/ferrite || { echo "das Binary blieb liegen"; exit 1; }
+          test -e /etc/ferrite/ferrite.conf \
+            || { echo "remove hat die Konffile mitgenommen"; exit 1; }
+          sudo apt-get purge -y ferrite
+          test ! -e /etc/ferrite/ferrite.conf || { echo "purge liess die Konffile stehen"; exit 1; }
+
+      # Was nur in einem der beiden Pakete landet, faellt sonst erst dem auf,
+      # der die andere Distribution benutzt. `ctl/tests/packaging.rs` haelt die
+      # Bauwege gegeneinander; hier stehen die fertigen Pakete nebeneinander.
+      # Die Dokumentation bleibt draussen: Debian will changelog.gz und
+      # copyright, RPM will %license — das ist kein Auseinanderlaufen, sondern
+      # zweimal dieselbe Regel verschiedener Distributionen.
+      - name: Beide Pakete tragen dasselbe
+        run: |
+          liste() {
+            sed -e 's|^/lib/systemd|/usr/lib/systemd|' \
+              | grep -v '^/usr/share/doc' \
+              | grep -v '^/\.$' \
+              | sort -u
+          }
+          dpkg -c "${{ steps.build.outputs.deb }}" | awk '$6 ~ /^\.\// && $1 !~ /^d/ {print substr($6,2)}' | liste > /tmp/deb.txt
+          # `-v`, um die Verzeichnisse zu erkennen: dpkg listet sie mit `d`,\n          # rpm ohne `-v` gar nicht als solche.\n          rpm -qlvp "${{ steps.build.outputs.rpm }}" | awk '$1 !~ /^d/ {print $NF}' | liste > /tmp/rpm.txt
+          diff -u /tmp/deb.txt /tmp/rpm.txt
+
+      # Das Paket traegt ein gestripptes Binary. Wer einen Backtrace von einer
+      # echten Maschine aufloesen will, braucht das ungestrippte aus demselben
+      # Bau — sonst ist der Bericht eine Liste von Adressen.
+      - name: Paket und Symbole sichern
+        uses: actions/upload-artifact@v7
+        with:
+          name: ferrite-packages
+          path: |
+            target/packages/*.deb
+            target/packages/*.rpm
+            target/release/ferrite

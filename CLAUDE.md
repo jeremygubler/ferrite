@@ -106,6 +106,7 @@ pool/     Platzierungsregeln und Vereinigung — kein I/O            [fertig]
 ctl/      create, status, run, scrub, replace, rebuild             [fertig]
           discover, check-flush, Konfiguration, systemd-Units      [fertig]
           Betriebstagebuch und Benachrichtigung                   [fertig]
+          Handbuchseite, .deb und .rpm, in CI installiert         [fertig]
           gRPC-Daemon und Web-UI                                     [offen]
 ```
 

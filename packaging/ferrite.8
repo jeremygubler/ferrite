@@ -1,0 +1,157 @@
+.TH FERRITE 8 "" "ferrite 0.1.0" "Systemverwaltung"
+.SH BEZEICHNUNG
+ferrite \- Paritaets-Array mit gemischten Plattengroessen
+.SH BESCHREIBUNG
+.PP
+Ferrite bildet Paritaet ueber gleiche Offsets statt ueber Streifen. Jede Datenplatte traegt ein eigenes Dateisystem und bleibt einzeln lesbar; faellt mehr aus, als die Paritaet abdeckt, sind die uebrigen Platten vollstaendig und einzeln montierbar.
+.PP
+Meldet btrfs einen Block als korrupt, rekonstruiert Ferrite ihn aus der Paritaet und schreibt ihn zurueck. Eigene Pruefsummen ueber Nutzdaten gibt es nicht \- die liegen bei btrfs.
+.SH AUFRUFE
+.nf
+ferrite \(em Werkzeug fuer ein Ferrite\-Array
+
+    ferrite create \-\-data <GERAET> [\-\-data <GERAET> ...]
+                   \-\-parity\-p <GERAET> [\-\-parity\-q <GERAET>]
+                   \-\-log <GERAET>
+                   [\-\-block\-size 64K] [\-\-label <NAME>] [\-\-force] [\-\-yes]
+
+        Legt ein Array an. **Zeigt standardmaessig nur den Plan** und
+        schreibt nichts; erst \-\-yes fuehrt ihn aus. Ein Geraet, auf dem
+        bereits ein Ferrite\-Superblock liegt, wird abgelehnt \(em \-\-force
+        ueberschreibt es.
+
+        \-\-parity\-q verdoppelt die Redundanz: Damit ueberlebt das Array zwei
+        gleichzeitig ausgefallene Datenplatten statt einer.
+
+    ferrite status <GERAET> [<GERAET> ...]
+
+        Liest die Superbloecke der angegebenen Geraete und zeigt, was sie
+        zusammen ergeben. Beschreibt nichts.
+
+        Rueckgabewert: 0 alles in Ordnung, 1 das Array laeuft degradiert,
+        2 es laesst sich so nicht zusammensetzen.
+
+    ferrite run <GERAET> [<GERAET> ...]
+                [\-\-pool <VERZEICHNIS>] [\-\-state\-dir /run/ferrite]
+                [\-\-fstype btrfs]
+
+        Nimmt das Array in Betrieb und bleibt. Spielt zuerst das Log
+        zurueck (Abschnitt 5.2) und stellt dann je Data\-Slot ein
+        Blockgeraet unter /dev/ublkbN bereit. Welche Rolle ein Geraet
+        traegt, steht in seinem Superblock.
+
+        Ohne \-\-pool endet es dort: Was auf den Blockgeraeten liegt und wie
+        es eingehaengt wird, entscheidet der Betreiber. Mit \-\-pool haengt
+        `ferrite` zusaetzlich jeden Data\-Member unter \-\-state\-dir ein und
+        darueber den vereinigten Pool. Ein Member ohne Dateisystem wird
+        gemeldet, nicht formatiert.
+
+        Beendet wird mit SIGINT oder SIGTERM. Das Aushaengen laeuft in
+        umgekehrter Reihenfolge; solange ein Prozess noch im Pool steht,
+        wartet es auf ihn.
+
+    ferrite scrub <GERAET> [<GERAET> ...] [\-\-repair]
+
+        Prueft, ob die Paritaet zum Inhalt der Data\-Members passt. Das ist
+        die Probe, die ein Geraet auffliegen laesst, das seinen Flush
+        belogen hat: Danach ist die Paritaet veraltet, und nur ein Scrub
+        findet das, bevor es beim naechsten Ausfall auffaellt.
+
+        Ohne \-\-repair wird nur gemeldet. Mit \-\-repair wird die Paritaet aus
+        den Data\-Members neu gebildet \(em die Daten gelten dabei als richtig.
+        Laeuft das Array degradiert, wird die Reparatur abgelehnt: Eine
+        Paritaet ueber einen unbrauchbaren Member zu bilden hiesse, die
+        Rekonstruktion aufzugeben.
+
+        Rueckgabewert: 0 stimmig, 1 Abweichungen gefunden, 2 nicht pruefbar.
+
+    ferrite replace <GERAET> [<GERAET> ...] \-\-slot <N> \-\-with <GERAET>
+                    [\-\-force] [\-\-yes]
+
+        Nimmt eine neue Platte als Ersatz fuer den ausgefallenen Slot <N>
+        auf. Angegeben werden die Geraete, die **noch da sind** \(em die
+        ausgefallene fehlt in der Liste. Danach steht der Slot als
+        unbrauchbar da und wartet auf `ferrite rebuild`.
+
+        Wie `create` standardmaessig ein Trockenlauf; erst \-\-yes schreibt.
+
+    ferrite rebuild <GERAET> [<GERAET> ...] \-\-slot <N> [\-\-batch 64]
+
+        Stellt den Inhalt von Slot <N> aus der Paritaet wieder her. Der
+        Fortschritt steht im Superblock: Ein Abbruch kostet hoechstens
+        einen Durchgang, danach geht es dort weiter, wo es aufgehoert hat.
+
+    ferrite discover [<VERZEICHNIS> ...]
+
+        Zeigt, welche Ferrite\-Arrays angeschlossen sind. Ohne Angabe wird
+        gesucht, wo die Konfiguration es sagt \(em voreingestellt in
+        /dev/disk/by\-id. Beschreibt nichts.
+
+        Dieselbe Platte steht dort oft mehrfach (`ata\-\&...` und `wwn\-\&...`);
+        entdoppelt wird ueber die Member\-UUID aus dem Superblock.
+
+    ferrite check\-flush <GERAET> [<GERAET> ...]
+
+        Fragt, ob das `FLUSH` eines Geraets ehrlich ist (Abschnitt 5.3).
+        Davon haengt ab, ob Write\-Back je erlaubt sein wird. Der Test kann
+        nur `Refused`, `Undecidable` oder `Honest` sagen \(em und `Honest` nur
+        auf einem echten Blockgeraet ohne fluechtigen Schreibcache auf
+        einem nicht virtualisierten System.
+
+        Schreibt nichts.
+
+    ferrite journal [\-\-config <DATEI>]
+
+        Wertet das Betriebstagebuch aus: wieviele Stunden, wieviele Scrubs,
+        wieviel Bit\-Rot repariert \(em und die beiden Zahlen, um die es geht:
+        wieviele Bereiche verloren und wieviele Reparaturen abgelehnt.
+
+        Wohin geschrieben wird, sagt `journal =` in der Konfiguration. Ohne
+        Angabe wird nichts aufgezeichnet, und dann ergibt ein Jahr Betrieb
+        nichts, was sich vorzeigen liesse.
+
+    ferrite help | version
+.fi
+.SH DATEIEN
+.TP
+.I /etc/ferrite/ferrite.conf
+Wo nach Members gesucht wird und was mit dem Ergebnis geschehen soll. Welche Platte welche Rolle traegt, steht in ihrem Superblock und nicht hier.
+.TP
+.I /usr/share/doc/ferrite/ferrite.conf.example
+Die Beispielkonfiguration mit allen Schluesseln.
+.TP
+.I /var/lib/ferrite/journal
+Das Betriebstagebuch, eine Zeile je Ereignis. Wohin es geht, sagt `journal =` in der Konfiguration.
+.TP
+.I /run/ferrite
+Einhaengepunkte der einzelnen Members, waehrend das Array laeuft.
+.SH RUECKGABEWERTE
+.TP
+.B 0
+Alles in Ordnung.
+.TP
+.B 1
+Ein Befund: das Array laeuft degradiert, oder ein Scrub hat Abweichungen gefunden. Kein Fehler des Programms.
+.TP
+.B 2
+Nicht durchfuehrbar \- das Array laesst sich so nicht zusammensetzen.
+.TP
+.B 64
+Fehler in der Bedienung.
+.SH DIENSTE
+.PP
+Das Paket bringt \fBferrite.service\fR mit, dazu \fBferrite\-scrub.timer\fR fuer einen monatlichen Durchlauf. \fBKeines von beiden wird bei der Installation eingeschaltet.\fR Ein Dienst, der ungefragt Blockgeraete uebernimmt und Dateisysteme einhaengt, gehoert nicht zu den Dingen, die ein Paket im Vorbeigehen entscheidet.
+.nf
+    systemctl enable \-\-now ferrite.service
+    systemctl enable \-\-now ferrite\-scrub.timer
+.fi
+.PP
+Der Scrub laeuft \fBohne \-\-repair\fR. Ein Zeitplan, der von selbst Paritaet neu bildet, ueberschriebe eine veraltete Paritaet auch dann, wenn die Ursache noch da ist.
+.SH VORAUSSETZUNGEN
+.PP
+Linux mit geladenem \fBublk_drv\fR und \fB/dev/fuse\fR; das Paket legt dafuer eine Datei unter \fI/usr/lib/modules\-load.d\fR ab. Fuer den FUSE\-Passthrough Kernel 6.9 oder neuer \- auf aelteren Kernen laeuft alles durch den Prozess, langsamer, aber richtig.
+.SH SIEHE AUCH
+.PP
+\fBbtrfs\-scrub\fR(8), \fBsystemd.timer\fR(5)
+.PP
+Das Formatdokument \fIdocs/FORMAT.md\fR ist normativ: Es beschreibt das On\-Disk\-Layout, und es ist bei 1.0 eingefroren.
