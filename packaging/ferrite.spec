@@ -21,8 +21,13 @@ Source4:        ferrite.conf.example
 Source5:        ferrite.8
 Source6:        modules-load.conf
 Source7:        COPYING
+Source8:        manifest.json
+Source9:        index.html
+Source10:       ferrite.js
+Source11:       ferrite.css
 
 Recommends:     btrfs-progs
+Suggests:       cockpit
 %{?systemd_requires}
 
 %description
@@ -49,6 +54,10 @@ install -D -m 0644 %{SOURCE4} %{buildroot}%{_docdir}/ferrite/ferrite.conf.exampl
 install -D -m 0644 %{SOURCE5} %{buildroot}%{_mandir}/man8/ferrite.8
 install -D -m 0644 %{SOURCE6} %{buildroot}%{_prefix}/lib/modules-load.d/ferrite.conf
 install -D -m 0644 %{SOURCE7} %{buildroot}%{_docdir}/ferrite/COPYING
+install -D -m 0644 %{SOURCE8} %{buildroot}%{_datadir}/cockpit/ferrite/manifest.json
+install -D -m 0644 %{SOURCE9} %{buildroot}%{_datadir}/cockpit/ferrite/index.html
+install -D -m 0644 %{SOURCE10} %{buildroot}%{_datadir}/cockpit/ferrite/ferrite.js
+install -D -m 0644 %{SOURCE11} %{buildroot}%{_datadir}/cockpit/ferrite/ferrite.css
 install -d -m 0755 %{buildroot}/var/lib/ferrite
 
 %post
@@ -85,3 +94,4 @@ fi
 %doc %{_docdir}/ferrite/ferrite.conf.example
 %license %{_docdir}/ferrite/COPYING
 %{_mandir}/man8/ferrite.8*
+%{_datadir}/cockpit/ferrite/

@@ -269,7 +269,7 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`: 41 Tests an einem echt eingehängten Pool, in CI — 5 für den Passthrough, 5 für erweiterte Attribute, 5 für POSIX-ACLs und 3 für Sperren, jeweils samt Gegenprobe mit abgeschalteter Aushandlung |
-| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Paketierung in `packaging/`: `.deb` und `.rpm` von Hand, systemd-Units, eine aus der Hilfe erzeugte Handbuchseite und 9 Tests gegen das Auseinanderlaufen der Pfade — das `.deb` wird in CI installiert und danach benutzt. Daemon und Web-UI offen |
+| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Paketierung in `packaging/`: `.deb` und `.rpm` von Hand, systemd-Units, eine aus der Hilfe erzeugte Handbuchseite und 14 Tests gegen das Auseinanderlaufen der Pfade — das `.deb` wird in CI installiert und danach benutzt. Dazu `--json` fuer status, discover und journal, in CI von `jq` gegengelesen, und darauf ein Cockpit-Modul ohne Framework, das anzeigt und nichts schreibt. gRPC-Daemon und Bedienung ueber die Oberflaeche offen |
 
 ```
 cargo test
@@ -319,6 +319,50 @@ prüft ausserdem, dass die systemd-Units auf den Pfad zeigen, an den das Paket
 das Programm wirklich legt. Das ist die Klasse Fehler, die sonst erst auf der
 Zielmaschine auffällt: Alles baut, alles installiert sich, und der Dienst
 startet nicht.
+
+## Ansehen
+
+Nach der Installation gibt es Ferrite als Seite in **Cockpit**, der
+Weboberfläche, die auf jedem Debian und Ubuntu in den Paketquellen liegt:
+
+```bash
+sudo apt install cockpit
+```
+
+Danach steht unter `https://<kiste>:9090` ein Punkt „Ferrite" im Menü. Er
+zeigt drei Dinge: den Zustand des Arrays als erstes und in einem Satz, darunter
+die Platten mit ihren Rollen und — falls einer läuft — dem Rebuild-Fortschritt,
+und darunter das Betriebstagebuch. Die Seite liest sich alle zwanzig Sekunden
+neu und schreibt dazu, wann zuletzt: Ein Bild von gestern sieht sonst genauso
+aus wie eines von jetzt, und „in Ordnung" von gestern ist keine Auskunft.
+
+Ganz oben im Tagebuch stehen die beiden Zahlen, um die es geht — **Bereiche
+verloren** und **Reparaturen abgelehnt**. Alles darunter ist Zählwerk.
+
+**Die Oberfläche zeigt an und tut nichts.** Kein Knopf löst einen Scrub aus,
+keiner startet einen Rebuild. Das ist kein unfertiger Zustand, sondern eine
+Entscheidung: Eine Oberfläche, die Platten beschreiben kann, braucht eine
+Rückfrage, ein Rechtekonzept und einen Wiederanlauf nach dem geschlossenen
+Browserfenster — und alle drei gehören entschieden, nicht nebenbei gebaut. Ein
+Test hält das fest und prüft, dass das Modul nur Befehle aufruft, die nichts
+schreiben.
+
+Kein Framework, kein Build-Schritt, keine Abhängigkeit: drei Dateien, die ein
+Betreiber im Fehlerfall lesen kann. Sie sprechen mit `ferrite` über dessen
+`--json`-Ausgabe und nicht über den Text für Menschen — wer den zerlegt, bricht
+beim ersten geänderten Wort, und zwar still, weil ein Regulärausdruck, der
+nichts findet, keinen Fehler wirft, sondern eine leere Liste.
+
+Dieselbe Ausgabe steht jedem Überwachungssystem offen:
+
+```bash
+ferrite status --json
+```
+
+Grössen in Bytes, Rollen und Zustände englisch und stabil. Der Rückgabewert
+bleibt derselbe wie ohne `--json` — 0 in Ordnung, 1 degradiert, 2 nicht
+zusammensetzbar —, damit ein Skript beim Umstellen nicht plötzlich andere
+Werte sieht.
 
 ## Ausprobieren
 

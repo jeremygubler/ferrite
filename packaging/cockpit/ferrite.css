@@ -1,0 +1,178 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Jeremy Gubler
+ *
+ * Farben aus Cockpits eigenen Variablen, wo es welche gibt. Ein Modul, das
+ * sich seine eigenen sucht, sieht im dunklen Thema falsch aus — und zwar erst
+ * beim Betreiber, der es umgestellt hat.
+ */
+
+body {
+    margin: 0;
+    background: var(--pf-v5-global--BackgroundColor--200, #f0f0f0);
+    color: var(--pf-v5-global--Color--100, #151515);
+    font-family: var(--pf-v5-global--FontFamily--sans-serif, system-ui, sans-serif);
+}
+
+main {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1rem;
+    max-width: 60rem;
+}
+
+.karte {
+    background: var(--pf-v5-global--BackgroundColor--100, #fff);
+    border: 1px solid var(--pf-v5-global--BorderColor--100, #d2d2d2);
+    border-radius: 4px;
+    padding: 1rem 1.25rem;
+}
+
+/* Die Kopfkarte traegt links einen Balken in der Farbe des Zustands. Wer die
+ * Seite auf dem Telefon aufmacht, soll die Antwort sehen, bevor er liest. */
+.kopf {
+    border-left: 6px solid var(--pf-v5-global--BorderColor--100, #d2d2d2);
+}
+.kopf.gut {
+    border-left-color: var(--pf-v5-global--success-color--100, #3e8635);
+}
+.kopf.warnung {
+    border-left-color: var(--pf-v5-global--warning-color--100, #f0ab00);
+}
+.kopf.schlecht {
+    border-left-color: var(--pf-v5-global--danger-color--100, #c9190b);
+}
+
+h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1.5rem;
+}
+
+h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1.1rem;
+}
+
+.kennung {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    margin: 0;
+}
+
+.uuid,
+.geraet {
+    font-family: var(--pf-v5-global--FontFamily--monospace, monospace);
+    font-size: 0.9em;
+}
+
+.nebensache {
+    color: var(--pf-v5-global--Color--200, #6a6e73);
+}
+
+.gut {
+    color: var(--pf-v5-global--success-color--100, #3e8635);
+}
+.warnung {
+    color: var(--pf-v5-global--warning-color--200, #795600);
+}
+.schlecht {
+    color: var(--pf-v5-global--danger-color--100, #c9190b);
+}
+
+.grund {
+    margin: 0.25rem 0 0;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--pf-v5-global--Color--200, #6a6e73);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+th,
+td {
+    padding: 0.4rem 0.5rem 0.4rem 0;
+    border-bottom: 1px solid var(--pf-v5-global--BorderColor--200, #ededed);
+    vertical-align: top;
+}
+
+.zahl {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.balken {
+    height: 4px;
+    margin-top: 0.35rem;
+    background: var(--pf-v5-global--BorderColor--200, #ededed);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.gefuellt {
+    height: 100%;
+    background: var(--pf-v5-global--warning-color--100, #f0ab00);
+}
+
+.zahlen {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.35rem 1rem;
+    margin: 0;
+}
+
+.zahlen dt {
+    color: var(--pf-v5-global--Color--200, #6a6e73);
+}
+
+.zahlen dd {
+    margin: 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.warte {
+    padding: 1rem;
+    color: var(--pf-v5-global--Color--200, #6a6e73);
+}
+
+/* Auf dem Telefon steht die Geraetespalte sonst über den Rand hinaus. */
+@media (max-width: 40rem) {
+    .geraet {
+        word-break: break-all;
+    }
+    main {
+        padding: 0.5rem;
+    }
+}
+
+/* Die beiden Zahlen, um die es geht, stehen oben und abgesetzt: alles
+ * darunter ist Zaehlwerk. */
+.zahlen .wichtig {
+    font-weight: 600;
+}
+
+.zahlen dd.wichtig {
+    border-bottom: 1px solid var(--pf-v5-global--BorderColor--200, #ededed);
+    padding-bottom: 0.35rem;
+}
+
+.zahlen dt.wichtig {
+    border-bottom: 1px solid var(--pf-v5-global--BorderColor--200, #ededed);
+    padding-bottom: 0.35rem;
+}
+
+.fuss {
+    margin: 0;
+    font-size: 0.85rem;
+}

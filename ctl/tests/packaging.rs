@@ -51,6 +51,10 @@ const INSTALLED: &[&str] = &[
     "ferrite.conf.example",
     "ferrite.8",
     "/var/lib/ferrite",
+    "cockpit/ferrite/manifest.json",
+    "cockpit/ferrite/index.html",
+    "cockpit/ferrite/ferrite.js",
+    "cockpit/ferrite/ferrite.css",
 ];
 
 #[test]
@@ -108,6 +112,7 @@ const RPM_MACROS: &[(&str, &str)] = &[
     ("%{_mandir}", "/usr/share/man"),
     ("%{_docdir}", "/usr/share/doc"),
     ("%{_prefix}", "/usr"),
+    ("%{_datadir}", "/usr/share"),
 ];
 
 /// Wohin das Bauskript wirklich schreibt.
@@ -263,6 +268,109 @@ fn every_script_may_actually_be_run() {
             "{script} ist nicht ausfuehrbar ({mode:o}) — `git update-index --chmod=+x` fehlt"
         );
     }
+}
+
+// --- Das Cockpit-Modul ----------------------------------------------------
+//
+// Ob die Seite huebsch ist, prueft kein Test. Was hier geprueft wird, sind
+// die drei Zusagen, die still brechen koennen: Sie ruft nur Befehle auf, die
+// nichts schreiben; sie bittet dabei um JSON und nicht um den Text fuer
+// Menschen; und sie laedt nichts, was das Paket nicht ablegt.
+
+/// Die Argumentlisten, mit denen `ferrite.js` das Werkzeug aufruft.
+///
+/// Gelesen wird der Quelltext, weil es hier keinen Javascript-Interpreter
+/// gibt. Das ist grob, faengt aber genau den Fall, um den es geht: Jemand
+/// traegt einen vierten Aufruf ein.
+fn ui_aufrufe() -> Vec<Vec<String>> {
+    let text = read("packaging/cockpit/ferrite.js");
+    let mut aufrufe = Vec::new();
+    for (offset, _) in text.match_indices("frage([") {
+        let rest = &text[offset + "frage([".len()..];
+        let Some(ende) = rest.find(']') else { continue };
+        aufrufe.push(
+            rest[..ende]
+                .split(',')
+                .map(|teil| teil.trim().trim_matches('"').to_string())
+                .filter(|teil| !teil.is_empty())
+                .collect(),
+        );
+    }
+    assert!(
+        !aufrufe.is_empty(),
+        "aus ferrite.js liess sich kein Aufruf lesen — hat sich der Name von `frage` geaendert?"
+    );
+    aufrufe
+}
+
+#[test]
+fn the_interface_only_calls_commands_that_write_nothing() {
+    // Die Entscheidung: Die Oberflaeche zeigt an und tut nichts. Ein Knopf,
+    // der einen Scrub ausloest, braucht eine Rueckfrage, ein Rechtekonzept
+    // und einen Wiederanlauf nach dem geschlossenen Browserfenster — und alle
+    // drei gehoeren entschieden, nicht nebenbei gebaut.
+    let lesend = ["status", "discover", "journal"];
+    for aufruf in ui_aufrufe() {
+        let befehl = aufruf.first().expect("ein Aufruf ohne Befehl");
+        assert!(
+            lesend.contains(&befehl.as_str()),
+            "die Oberflaeche ruft `ferrite {befehl}` auf — das schreibt"
+        );
+    }
+}
+
+#[test]
+fn the_interface_asks_for_json_and_not_for_prose() {
+    // Wer die Textausgabe zerlegt, bricht beim ersten geaenderten Wort, und
+    // zwar still: Ein Regulaerausdruck, der nichts findet, wirft keinen
+    // Fehler, sondern liefert eine leere Liste.
+    for aufruf in ui_aufrufe() {
+        assert!(
+            aufruf.iter().any(|teil| teil == "--json"),
+            "dieser Aufruf holt sich Text statt JSON: {aufruf:?}"
+        );
+    }
+}
+
+#[test]
+fn the_page_loads_only_files_the_package_ships() {
+    // `../base1/` kommt von Cockpit selbst. Alles andere muss im Paket
+    // liegen, sonst laedt der Browser ins Leere — und zeigt eine Seite ohne
+    // Stil und ohne Inhalt, statt zu sagen, was fehlt.
+    let seite = read("packaging/cockpit/index.html");
+    let mut geprueft = 0;
+    for attribut in ["href=\"", "src=\""] {
+        for (offset, _) in seite.match_indices(attribut) {
+            let rest = &seite[offset + attribut.len()..];
+            let Some(ende) = rest.find('"') else { continue };
+            let ziel = &rest[..ende];
+            if ziel.starts_with("../") || ziel.contains("://") {
+                continue;
+            }
+            geprueft += 1;
+            let pfad = root().join("packaging/cockpit").join(ziel);
+            assert!(pfad.exists(), "index.html laedt {ziel}, das es nicht gibt");
+        }
+    }
+    assert_eq!(geprueft, 2, "erwartet werden ferrite.css und ferrite.js");
+}
+
+#[test]
+fn the_manifest_names_the_page_and_a_policy() {
+    // Ob die Datei gueltiges JSON ist, prueft CI mit einem echten Parser und
+    // mit `cockpit-bridge --packages`. Hier steht nur, was drinstehen muss.
+    let manifest = read("packaging/cockpit/manifest.json");
+    for pflicht in [
+        "\"name\"",
+        "\"menu\"",
+        "\"index\"",
+        "\"content-security-policy\"",
+    ] {
+        assert!(manifest.contains(pflicht), "im Manifest fehlt {pflicht}");
+    }
+    // Ohne `default-src 'self'` duerfte die Seite von ueberall nachladen. Auf
+    // einer Oberflaeche, die als Root laeuft, ist das keine Kleinigkeit.
+    assert!(manifest.contains("default-src 'self'"));
 }
 
 #[test]

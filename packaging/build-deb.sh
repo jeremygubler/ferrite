@@ -69,6 +69,15 @@ install -D -m 0644 "$HERE/ferrite.conf.example"    "$STAGE/etc/ferrite/ferrite.c
 install -D -m 0644 "$HERE/ferrite.conf.example"    "$STAGE/usr/share/doc/ferrite/ferrite.conf.example"
 install -D -m 0644 "$HERE/copyright"               "$STAGE/usr/share/doc/ferrite/copyright"
 
+# Das Cockpit-Modul. Es liegt im selben Paket und nicht in einem eigenen:
+# fuenfzehn Kilobyte statische Dateien, die ohne Cockpit einfach herumliegen.
+# Ein zweites Paket waere eine zweite Versionsnummer, die auseinanderlaufen
+# kann, fuer nichts.
+install -D -m 0644 "$HERE/cockpit/manifest.json" "$STAGE/usr/share/cockpit/ferrite/manifest.json"
+install -D -m 0644 "$HERE/cockpit/index.html"   "$STAGE/usr/share/cockpit/ferrite/index.html"
+install -D -m 0644 "$HERE/cockpit/ferrite.js"   "$STAGE/usr/share/cockpit/ferrite/ferrite.js"
+install -D -m 0644 "$HERE/cockpit/ferrite.css"  "$STAGE/usr/share/cockpit/ferrite/ferrite.css"
+
 # `-n` laesst den Zeitstempel weg. Sonst enthielte dasselbe Paket, zweimal
 # gebaut, verschiedene Bytes — und dann laesst sich nicht mehr zeigen, dass
 # eine Datei aus genau diesem Quelltext stammt.
@@ -113,6 +122,7 @@ Maintainer: Jeremy Gubler <gubler.jeremy@gmail.com>
 Installed-Size: $SIZE
 Depends: libc6 (>= $GLIBC)
 Recommends: btrfs-progs
+Suggests: cockpit
 Section: admin
 Priority: optional
 Homepage: https://github.com/jeremygubler/ferrite

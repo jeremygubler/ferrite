@@ -372,7 +372,7 @@ jobs:
       - name: Werkzeuge bereitstellen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq lintian rpm groff-base
+          sudo apt-get install -y -qq lintian rpm groff-base cockpit-bridge jq
           lintian --version
           rpmbuild --version
 
@@ -415,6 +415,38 @@ jobs:
         run: |
           /usr/bin/ferrite version
           /usr/bin/ferrite --help > /dev/null
+
+      # Die Oberflaeche zerlegt keine Prosa, sie liest JSON. Also muss das,
+      # was herauskommt, ein echter Parser lesen koennen — und nicht der, den
+      # dieses Projekt selbst geschrieben hat.
+      - name: Die JSON-Ausgabe ist welches
+        run: |
+          set -e
+          mkdir -p /tmp/json
+          for name in a b p log; do truncate -s 64M "/tmp/json/$name.img"; done
+          /usr/bin/ferrite create --data /tmp/json/a.img --data /tmp/json/b.img \
+            --parity-p /tmp/json/p.img --log /tmp/json/log.img --yes > /dev/null
+          /usr/bin/ferrite status /tmp/json/*.img --json | tee /tmp/json/status.json
+          jq -e ".health == \"healthy\"" /tmp/json/status.json > /dev/null
+          jq -e ".members | length == 4" /tmp/json/status.json > /dev/null
+          jq -e ".members[0].role == \"data\" and .members[0].state == \"clean\"" /tmp/json/status.json > /dev/null
+          /usr/bin/ferrite discover /tmp/json --json | jq -e ".arrays | length == 1" > /dev/null
+          # Auch der Fehlerfall ist ein Objekt und keine Prosa auf stderr:
+          # Eine Oberflaeche, die hier nichts bekaeme, zeigte eine leere Seite.
+          /usr/bin/ferrite status --config /tmp/json/gibtsnicht.conf --json \
+            | jq -e ".health == \"broken\" and (.error | length > 0)" > /dev/null
+          echo "JSON: von jq gelesen"
+
+      # Ein Modul mit kaputtem Manifest faellt sonst erst dem auf, der die
+      # Seite aufschlaegt — und der sieht nur, dass sie im Menue fehlt.
+      - name: Das Cockpit-Modul
+        run: |
+          set -e
+          node --check /usr/share/cockpit/ferrite/ferrite.js
+          python3 -m json.tool /usr/share/cockpit/ferrite/manifest.json > /dev/null
+          cockpit-bridge --packages | grep -q "^ferrite " \
+            || { echo "cockpit kennt das Modul nicht"; cockpit-bridge --packages; exit 1; }
+          cockpit-bridge --packages | grep "^ferrite "
 
       # Eine Handbuchseite, die roff nicht uebersetzen kann, faellt sonst erst
       # dem auf, der sie aufschlaegt.

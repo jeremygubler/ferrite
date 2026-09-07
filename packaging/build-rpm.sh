@@ -40,6 +40,9 @@ cp "$HERE/ferrite.conf.example"           "$TOP/SOURCES/ferrite.conf.example"
 cp "$HERE/ferrite.8"                      "$TOP/SOURCES/ferrite.8"
 cp "$HERE/modules-load.d/ferrite.conf"    "$TOP/SOURCES/modules-load.conf"
 cp "$HERE/../LICENSE"                     "$TOP/SOURCES/COPYING"
+for datei in manifest.json index.html ferrite.js ferrite.css; do
+    cp "$HERE/cockpit/$datei"             "$TOP/SOURCES/$datei"
+done
 cp "$HERE/ferrite.spec"                   "$TOP/SPECS/ferrite.spec"
 
 # `_unitdir` definiert sonst nur systemd-rpm-macros, und die gibt es auf einem

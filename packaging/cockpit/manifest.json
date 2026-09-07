@@ -1,0 +1,29 @@
+{
+    "version": 0,
+    "name": "ferrite",
+    "requires": {
+        "cockpit": "266"
+    },
+    "menu": {
+        "index": {
+            "label": "Ferrite",
+            "order": 30,
+            "keywords": [
+                {
+                    "matches": [
+                        "ferrite",
+                        "array",
+                        "paritaet",
+                        "parity",
+                        "raid",
+                        "nas",
+                        "scrub",
+                        "rebuild",
+                        "pool"
+                    ]
+                }
+            ]
+        }
+    },
+    "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+}

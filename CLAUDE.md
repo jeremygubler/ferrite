@@ -107,7 +107,9 @@ ctl/      create, status, run, scrub, replace, rebuild             [fertig]
           discover, check-flush, Konfiguration, systemd-Units      [fertig]
           Betriebstagebuch und Benachrichtigung                   [fertig]
           Handbuchseite, .deb und .rpm, in CI installiert         [fertig]
-          gRPC-Daemon und Web-UI                                     [offen]
+          --json fuer status, discover, journal                    [fertig]
+          Cockpit-Modul: anzeigen, nicht bedienen                  [fertig]
+          gRPC-Daemon, Bedienung ueber die Oberflaeche               [offen]
 ```
 
 Reihenfolge der Meilensteine steht im README. Sie ist bewusst so gewählt: Das
