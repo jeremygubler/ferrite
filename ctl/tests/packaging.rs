@@ -231,6 +231,41 @@ fn without_here_documents(text: &str) -> Vec<&str> {
 }
 
 #[test]
+#[cfg(unix)]
+fn every_script_may_actually_be_run() {
+    // Das Ausfuehrbar-Bit steht im Git-Index, nicht in der Arbeitskopie eines
+    // Windows-Rechners — und wer dort eine Datei neu anlegt, vergisst es. Das
+    // faellt nirgends auf: Die Tests laufen, das Skript laesst sich mit `sh`
+    // starten, und erst der CI-Job bricht mit `Permission denied` ab.
+    // Gemessen: genau so, beim ersten Anlauf.
+    //
+    // **Auf einem WSL-Checkout unter /mnt/c faellt dieser Test nie um.** DrvFs
+    // meldet jede Datei als 0777, egal was `chmod` sagt. Nachgewiesen wurde er
+    // deshalb in einem frischen `git clone` auf einem echten Linux-Dateisystem:
+    // dort steht das Bit aus dem Index in der Datei, und ohne es wird der Test
+    // rot.
+    use std::os::unix::fs::PermissionsExt;
+
+    for script in [
+        "packaging/build-deb.sh",
+        "packaging/build-rpm.sh",
+        "packaging/deb/postinst",
+        "packaging/deb/prerm",
+        "packaging/deb/postrm",
+    ] {
+        let path = root().join(script);
+        let mode = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "{script} ist nicht ausfuehrbar ({mode:o}) — `git update-index --chmod=+x` fehlt"
+        );
+    }
+}
+
+#[test]
 fn the_scheduled_scrub_does_not_repair() {
     // Ein Zeitplan, der von selbst Paritaet neu bildet, ueberschriebe eine
     // veraltete Paritaet auch dann, wenn die Ursache noch da ist. Erst
