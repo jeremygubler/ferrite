@@ -48,6 +48,8 @@ pub enum Command {
     CheckFlush(StatusRequest),
     /// Zeigen, welche Ferrite-Arrays angeschlossen sind.
     Discover(DiscoverRequest),
+    /// Der taegliche Blick: nachsehen und bei einer Aenderung melden.
+    Check(StatusRequest),
     /// Das Betriebstagebuch auswerten.
     Journal {
         config: Option<PathBuf>,
@@ -225,7 +227,8 @@ pub fn parse(arguments: &[String]) -> Result<Command, ArgError> {
     };
     match command.as_str() {
         "create" => parse_create(rest).map(|plan| Command::Create(Box::new(plan))),
-        "status" => parse_status(rest),
+        "status" => parse_status(rest, "status").map(Command::Status),
+        "check" => parse_status(rest, "check").map(Command::Check),
         "run" => parse_run(rest).map(|plan| Command::Run(Box::new(plan))),
         "scrub" => parse_scrub(rest),
         "replace" => parse_replace(rest).map(|plan| Command::Replace(Box::new(plan))),
@@ -600,7 +603,9 @@ fn parse_slot(value: &str) -> Result<u16, ArgError> {
     })
 }
 
-fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
+/// `status` und `check` nehmen dieselben Argumente. Der Name kommt herein,
+/// damit ein Bedienfehler bei `check` auch `check` sagt und nicht `status`.
+fn parse_status(arguments: &[String], command: &'static str) -> Result<StatusRequest, ArgError> {
     // Auch hier heisst leer: suchen. Ein Ueberwachungsskript ruft `ferrite
     // status` ohne Argumente auf und will keine Geraeteliste pflegen.
     let mut devices: Vec<PathBuf> = Vec::new();
@@ -625,18 +630,18 @@ fn parse_status(arguments: &[String]) -> Result<Command, ArgError> {
         }
         if argument.starts_with("--") {
             return Err(ArgError::UnknownOption {
-                command: "status",
+                command,
                 option: argument.to_string(),
             });
         }
         devices.push(PathBuf::from(argument));
         index += 1;
     }
-    Ok(Command::Status(StatusRequest {
+    Ok(StatusRequest {
         devices,
         config,
         json,
-    }))
+    })
 }
 
 /// Kein Geraet darf zweimal vorkommen.
@@ -706,6 +711,29 @@ ferrite — Werkzeug fuer ein Ferrite-Array
         Der Text daneben ist fuer Menschen gesetzt und darf sich aendern; wer
         ihn zerlegt, bricht beim ersten neuen Wort. Der Rueckgabewert ist in
         beiden Faellen derselbe.
+
+    ferrite check [<GERAET> ...] [--config <DATEI>]
+
+        Der taegliche Blick, fuer den Zeitplan gedacht und nicht fuer die
+        Hand. Sieht nach wie `status` und **meldet sich, wenn sich etwas
+        geaendert hat**: Eintrag ins Tagebuch, Aufruf des `notify`-Befehls
+        aus der Konfiguration.
+
+        Gemeldet wird nur eine Aenderung. Ein Array, das seit drei Wochen
+        degradiert laeuft, schickt keine 21 Meldungen — es hat die eine
+        geschickt, als es degradiert ist. Und die Entwarnung nach einem
+        Rebuild zaehlt als Aenderung: Wer keine bekommt, sieht so lange
+        nach, bis er aufhoert nachzusehen.
+
+        Das Gedaechtnis steht im Tagebuch. Ohne `journal =` in der
+        Konfiguration gibt es nichts zu vergleichen; dann wird der Befund
+        gezeigt und nichts gemeldet.
+
+        Der Timer `ferrite-check.timer` ruft das taeglich auf. Ohne ihn
+        faellt eine ausgefallene Platte erst beim naechsten Scrub auf —
+        also bis zu einen Monat spaeter.
+
+        Rueckgabewert wie `status`.
 
     ferrite run <GERAET> [<GERAET> ...]
                 [--pool <VERZEICHNIS>] [--state-dir /run/ferrite]

@@ -320,6 +320,120 @@ pub fn status_json(devices: &[PathBuf], named: Option<&Path>) -> (String, crate:
     (report::status_json(&seen), report::survey(&seen).health)
 }
 
+/// Was der taegliche Blick ergeben hat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub report: Report,
+    /// Der zuletzt aufgezeichnete Zustand, falls je einer aufgezeichnet wurde.
+    pub previous: Option<u8>,
+    /// Wurde ein Eintrag geschrieben — und damit gemeldet?
+    pub reported: bool,
+    /// Warum nicht, falls nicht.
+    pub trouble: Option<String>,
+}
+
+/// Sieht nach, wie es dem Array geht, und meldet sich bei einer Aenderung.
+///
+/// # Warum das ein eigener Aufruf ist und kein `status --notify`
+///
+/// `status` ist der Blick eines Menschen und darf nichts tun. Dies hier ist
+/// der Blick eines Zeitplans: Er schreibt ins Tagebuch und ruft den
+/// `notify`-Befehl. Beides gehoert nicht in einen Aufruf, den jemand
+/// beilaeufig auf der Kommandozeile macht.
+///
+/// # Die Regel, an der alles haengt
+///
+/// **Gemeldet wird nur eine Aenderung.** Ein Array, das seit drei Wochen
+/// degradiert laeuft, schickt keine 21 Mails; es hat die eine geschickt, als
+/// es degradiert ist. Eine Meldung, die jeden Tag dasselbe sagt, wird nach
+/// einer Woche nicht mehr gelesen — und dann wird auch die uebersehen, die
+/// etwas Neues sagt.
+///
+/// Und die Entwarnung zaehlt als Aenderung. Wer nach einem Rebuild keine
+/// bekommt, sieht so lange nach, bis er aufhoert nachzusehen.
+///
+/// # Woher das Gedaechtnis kommt
+///
+/// Aus dem Tagebuch. Ohne `journal =` in der Konfiguration gibt es keines,
+/// und dann kann dieser Aufruf nichts vergleichen — er sagt das und meldet
+/// nichts, statt jeden Tag dieselbe Mail zu schicken.
+pub fn check(devices: &[PathBuf], named: Option<&Path>) -> Check {
+    use crate::journal::{summarize, Event};
+
+    let report = status(devices, named);
+    let health = report.health.exit_code();
+
+    let config = match load_config(named) {
+        Ok(config) => config,
+        Err(error) => {
+            return Check {
+                report,
+                previous: None,
+                reported: false,
+                trouble: Some(error.to_string()),
+            }
+        }
+    };
+    let Some(path) = &config.journal else {
+        return Check {
+            report,
+            previous: None,
+            reported: false,
+            trouble: Some(
+                "Es wird kein Tagebuch gefuehrt — ohne eines gibt es nichts zu vergleichen. \
+                 `journal = /var/lib/ferrite/journal` in die Konfiguration eintragen."
+                    .to_string(),
+            ),
+        };
+    };
+
+    // Eine Datei, die es noch nicht gibt, ist ein leeres Tagebuch und kein
+    // Fehler: Beim allerersten Lauf ist genau das der Normalfall.
+    let previous = summarize(&std::fs::read_to_string(path).unwrap_or_default()).last_health;
+
+    // Nichts aufgezeichnet und alles in Ordnung: Dann gibt es nichts zu
+    // sagen. Schweigen ist hier die richtige Antwort, und ein Eintrag
+    // „Array in Ordnung" waere der erste von 365.
+    if previous.is_none() && health == 0 {
+        return Check {
+            report,
+            previous,
+            reported: false,
+            trouble: None,
+        };
+    }
+    if previous == Some(health) {
+        return Check {
+            report,
+            previous,
+            reported: false,
+            trouble: None,
+        };
+    }
+
+    let event = Event::HealthChanged {
+        from: previous.unwrap_or(0),
+        to: health,
+    };
+    match crate::journal::record(&config, &event) {
+        Ok(()) => Check {
+            report,
+            previous,
+            reported: true,
+            trouble: None,
+        },
+        // Der Befund selbst bleibt stehen, auch wenn das Melden schiefging.
+        // Ein Aufruf, der wegen einer kaputten Tagebuchdatei den Ausfall
+        // verschweigt, waere die schlechteste aller Antworten.
+        Err(error) => Check {
+            report,
+            previous,
+            reported: false,
+            trouble: Some(error.to_string()),
+        },
+    }
+}
+
 // --- Umgebung -------------------------------------------------------------
 
 /// Sechzehn Bytes aus dem Zufallsgenerator des Betriebssystems.

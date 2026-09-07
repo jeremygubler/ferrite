@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         }
         Command::Create(plan) => execute_create(&plan),
         Command::Status(request) => execute_status(&request),
+        Command::Check(request) => execute_check(&request),
         Command::Run(plan) => execute_run(&plan),
         Command::Scrub(request) => execute_scrub(&request),
         Command::Replace(plan) => execute_replace(&plan),
@@ -77,6 +78,27 @@ fn execute_status(request: &ferrite_ctl::args::StatusRequest) -> ExitCode {
     let report = ferrite_ctl::run::status(&request.devices, request.config.as_deref());
     print!("{}", report.text);
     ExitCode::from(report.health.exit_code())
+}
+
+#[cfg(unix)]
+fn execute_check(request: &ferrite_ctl::args::StatusRequest) -> ExitCode {
+    let check = ferrite_ctl::run::check(&request.devices, request.config.as_deref());
+
+    // Der Befund selbst zuerst und immer: `systemctl status ferrite-check`
+    // soll zeigen, was los ist, und nicht nur, dass etwas los war.
+    print!("{}", check.report.text);
+    match (&check.trouble, check.reported) {
+        (Some(grund), _) => eprintln!("Nicht aufgezeichnet: {grund}"),
+        (None, true) => println!("Zustandswechsel aufgezeichnet und gemeldet."),
+        (None, false) => println!("Unveraendert — nichts zu melden."),
+    }
+    ExitCode::from(check.report.health.exit_code())
+}
+
+#[cfg(not(unix))]
+fn execute_check(_request: &ferrite_ctl::args::StatusRequest) -> ExitCode {
+    eprintln!("ferrite check braucht ein System mit Blockgeraeten.");
+    ExitCode::from(EXIT_USAGE)
 }
 
 /// Ohne Blockgeraete gibt es nichts anzulegen und nichts anzusehen. Melden

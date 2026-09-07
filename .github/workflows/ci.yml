@@ -462,9 +462,10 @@ jobs:
         run: |
           systemd-analyze verify /lib/systemd/system/ferrite.service
           systemd-analyze verify /lib/systemd/system/ferrite-scrub.timer
+          systemd-analyze verify /lib/systemd/system/ferrite-check.timer
           # Verlangt und nicht nur gemeldet: Ein Paket, das beim Auspacken
           # Blockgeraete uebernimmt, hat sich diese Entscheidung angemasst.
-          for unit in ferrite.service ferrite-scrub.timer; do
+          for unit in ferrite.service ferrite-scrub.timer ferrite-check.timer; do
             state=$(systemctl is-enabled "$unit" || true)
             [ "$state" = disabled ] || { echo "$unit ist $state statt disabled"; exit 1; }
           done

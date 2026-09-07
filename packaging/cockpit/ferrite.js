@@ -259,6 +259,7 @@ function tagebuch(zusammenfassung) {
         ["Scrubs", zusammenfassung.scrubs],
         ["Bit-Rot repariert", zusammenfassung.bit_rot_repaired],
         ["Dabei zurueckgeschrieben", groesse(zusammenfassung.bytes_repaired)],
+        ["Zustandswechsel", zusammenfassung.health_changes],
         ["Rebuilds", zusammenfassung.rebuilds],
         ["Plattenwechsel", zusammenfassung.replacements],
     ].forEach(function (paar) {

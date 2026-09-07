@@ -269,7 +269,7 @@ von Anfang an mitläuft.
 | `broker/` | Parser für die Scrub-Meldungen von btrfs, Zusammenfassung benachbarter Befunde, Zuordnung Gerät → Slot, Kernel-Ringpuffer — 23 Tests grün, alles ohne I/O prüfbar ausser dem Ringpuffer |
 | `harness/` | Crash-Harness: Absturz an jedem I/O-Punkt, drei Zusagen, Selbsttest gegen einen bekannten Fehler — 5 Tests in CI. Dazu 7 für den Broker an einem echten Array, 5 gegen fehlerhafte Geräte (`dm-dust`, `dm-flakey`) und einer für die ganze Kette mit echtem btrfs und echtem Scrub — alle in CI, die letzten beiden Gruppen mit Root |
 | `pool/` | Platzierung nach Allocation, Split-Tiefe und Reserve, Vereinigung mehrerer Branches, Konflikterkennung — 99 Tests grün, davon 67 dependency- und I/O-frei. Dazu die FUSE-Schale von Hand über `/dev/fuse` und `mount(2)`: 41 Tests an einem echt eingehängten Pool, in CI — 5 für den Passthrough, 5 für erweiterte Attribute, 5 für POSIX-ACLs und 3 für Sperren, jeweils samt Gegenprobe mit abgeschalteter Aushandlung |
-| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Paketierung in `packaging/`: `.deb` und `.rpm` von Hand, systemd-Units, eine aus der Hilfe erzeugte Handbuchseite und 14 Tests gegen das Auseinanderlaufen der Pfade — das `.deb` wird in CI installiert und danach benutzt. Dazu `--json` fuer status, discover und journal, in CI von `jq` gegengelesen, und darauf ein Cockpit-Modul ohne Framework, das anzeigt und nichts schreibt. gRPC-Daemon und Bedienung ueber die Oberflaeche offen |
+| `ctl/` | Das Werkzeug `ferrite`: anlegen, Zustand, Betrieb, Scrub, Ersatz, Rebuild, Geräteerkennung, Flush-Test, Betriebstagebuch — 131 Tests grün, davon 39 gegen das echte Binary ohne Root (Reparaturablauf, Konfiguration, Tagebuch und Meldung). Dazu 5, die den ganzen Stapel von außen durchspielen (ublk, btrfs, Pool, Neustart), in CI mit Root. Paketierung in `packaging/`: `.deb` und `.rpm` von Hand, systemd-Units, eine aus der Hilfe erzeugte Handbuchseite und 14 Tests gegen das Auseinanderlaufen der Pfade — das `.deb` wird in CI installiert und danach benutzt. Dazu `--json` fuer status, discover und journal, in CI von `jq` gegengelesen, und darauf ein Cockpit-Modul ohne Framework, das anzeigt und nichts schreibt. `ferrite check` sieht taeglich nach und meldet **nur eine Aenderung** — 6 Tests gegen das echte Binary, mit einem `notify`, das mitzaehlt. gRPC-Daemon und Bedienung ueber die Oberflaeche offen |
 
 ```
 cargo test
@@ -302,6 +302,34 @@ ein Array anlegen, dann:
 sudo systemctl enable --now ferrite.service
 sudo systemctl enable --now ferrite-scrub.timer
 ```
+
+Zwei Timer gehören dazu, und der wichtigere ist der unscheinbare:
+
+```bash
+sudo systemctl enable --now ferrite-check.timer
+```
+
+`ferrite check` sieht **täglich** nach und meldet sich, wenn sich etwas
+geändert hat — Eintrag ins Tagebuch, Aufruf des `notify`-Befehls. Ohne ihn
+fällt eine ausgefallene Platte erst beim nächsten Scrub auf, und der läuft
+monatlich. Drei Wochen degradiert zu laufen, ohne es zu wissen, heisst: Der
+zweite Ausfall kommt unangekündigt, und dann ist es zu spät.
+
+Gemeldet wird **nur eine Änderung**. Ein Array, das seit drei Wochen
+degradiert läuft, schickt keine 21 Meldungen — es hat die eine geschickt, als
+es degradiert ist. Eine Meldung, die jeden Tag dasselbe sagt, wird nach einer
+Woche nicht mehr gelesen, und dann wird auch die übersehen, die etwas Neues
+sagt. Die Entwarnung nach einem Rebuild zählt dabei als Änderung: Wer keine
+bekommt, sieht so lange nach, bis er aufhört nachzusehen.
+
+Das Gedächtnis steht im Tagebuch, nicht in einer eigenen Datei — ein zweiter
+Ort für denselben Zustand weicht eines Tages ab. Ohne `journal =` in der
+Konfiguration gibt es nichts zu vergleichen; dann zeigt `check` den Befund und
+sagt, dass er nichts melden kann.
+
+Was Ferrite dabei **nicht** tut: SMART lesen. Eine Platte, die sich ankündigt,
+meldet `smartd` — und der ruft denselben `notify`-Befehl auf, wenn man ihn
+darauf zeigen lässt. Zwei Programme für dieselbe Aufgabe wären eines zu viel.
 
 Der Scrub-Timer läuft monatlich und **ohne `--repair`**: Ein Zeitplan, der von
 selbst Parität neu bildet, überschriebe eine veraltete Parität auch dann, wenn

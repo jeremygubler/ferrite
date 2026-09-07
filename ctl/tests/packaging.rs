@@ -46,6 +46,8 @@ const INSTALLED: &[&str] = &[
     "ferrite.service",
     "ferrite-scrub.service",
     "ferrite-scrub.timer",
+    "ferrite-check.service",
+    "ferrite-check.timer",
     "modules-load.d/ferrite.conf",
     "/etc/ferrite/ferrite.conf",
     "ferrite.conf.example",
@@ -83,7 +85,11 @@ fn every_unit_calls_the_path_the_package_installs() {
     // Eine Unit, die auf `/usr/local/bin/ferrite` zeigt, faellt beim Bauen
     // nicht auf und beim Starten sofort — auf der Maschine des Betreibers.
     let mut gesehen = 0;
-    for unit in ["ferrite.service", "ferrite-scrub.service"] {
+    for unit in [
+        "ferrite.service",
+        "ferrite-scrub.service",
+        "ferrite-check.service",
+    ] {
         for line in read(&format!("packaging/systemd/{unit}")).lines() {
             let Some(command) = line.strip_prefix("ExecStart=") else {
                 continue;
@@ -96,7 +102,7 @@ fn every_unit_calls_the_path_the_package_installs() {
             );
         }
     }
-    assert_eq!(gesehen, 2, "beide Units brauchen ein ExecStart");
+    assert_eq!(gesehen, 3, "jede Unit braucht ein ExecStart");
 }
 
 /// Die rpm-Makros, die im Spec vorkommen, mit den Werten, unter denen gebaut

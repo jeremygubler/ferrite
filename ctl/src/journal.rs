@@ -111,6 +111,18 @@ pub enum Event {
     Degraded {
         slot: u16,
     },
+    /// Der Zustand des Arrays ist ein anderer als beim letzten Blick.
+    ///
+    /// Geschrieben von `ferrite check`, und **nur bei einer Aenderung**. Ein
+    /// Tagebuch, in dem jeden Tag dieselbe Zeile steht, ist nach einem Jahr
+    /// 365 Zeilen Rauschen um die eine herum, auf die es ankommt.
+    ///
+    /// `from` und `to` sind die Rueckgabewerte von `status`: 0 in Ordnung,
+    /// 1 degradiert, 2 nicht zusammensetzbar.
+    HealthChanged {
+        from: u8,
+        to: u8,
+    },
 }
 
 impl Event {
@@ -127,6 +139,13 @@ impl Event {
                 }
             }
             Event::Degraded { .. } => Severity::Warning,
+            // Jede Aenderung meldet sich, auch die zum Guten: Wer nach einem
+            // Rebuild keine Entwarnung bekommt, sieht so lange nach, bis er
+            // aufhoert nachzusehen. `Warning` ist die Schwelle, ab der
+            // `record` meldet — deshalb steht die Entwarnung dort und nicht
+            // bei `Info`.
+            Event::HealthChanged { to: 2, .. } => Severity::Alert,
+            Event::HealthChanged { .. } => Severity::Warning,
             // Verlorene Daten und eine Reparatur, die nicht eindeutig ist:
             // beides Faelle, in denen ein Mensch hinsehen muss.
             Event::Recovered { lost, .. } => {
@@ -151,6 +170,7 @@ impl Event {
             Event::Rebuilt { .. } => "rebuild",
             Event::Replaced { .. } => "ersatz",
             Event::Degraded { .. } => "degradiert",
+            Event::HealthChanged { .. } => "zustand",
         }
     }
 
@@ -189,6 +209,9 @@ impl Event {
             }
             Event::Replaced { slot } => format!("Slot {slot} durch eine neue Platte ersetzt"),
             Event::Degraded { slot } => format!("Slot {slot} traegt keine gueltigen Daten mehr"),
+            Event::HealthChanged { from, to } => {
+                format!("Array {} (vorher {})", health_name(*to), health_name(*from))
+            }
         }
     }
 
@@ -216,6 +239,9 @@ impl Event {
             }
             Event::Rebuilt { slot, blocks } => {
                 vec![("slot", slot.to_string()), ("blocks", blocks.to_string())]
+            }
+            Event::HealthChanged { from, to } => {
+                vec![("from", from.to_string()), ("to", to.to_string())]
             }
         }
     }
@@ -245,6 +271,16 @@ pub fn format(at: i64, event: &Event) -> String {
     }
     line.push('\n');
     line
+}
+
+/// Wie ein Zustandswert heisst — dieselben drei wie der Rueckgabewert von
+/// `status`.
+fn health_name(code: u8) -> &'static str {
+    match code {
+        0 => "in Ordnung",
+        1 => "degradiert",
+        _ => "nicht zusammensetzbar",
+    }
 }
 
 /// Liest eine Zeile zurueck.
@@ -295,6 +331,10 @@ pub fn parse(line: &str) -> Option<Entry> {
         "degradiert" => Event::Degraded {
             slot: get("slot")? as u16,
         },
+        "zustand" => Event::HealthChanged {
+            from: get("from")? as u8,
+            to: get("to")? as u8,
+        },
         _ => return None,
     };
     Some(Entry { at, event })
@@ -323,6 +363,21 @@ pub struct Summary {
     pub rebuilds: u64,
     pub replacements: u64,
     pub alerts: u64,
+    /// Wie oft der taegliche Blick etwas anderes gefunden hat als zuvor.
+    pub health_changes: u64,
+    /// Der zuletzt **aufgezeichnete** Zustand: 0 in Ordnung, 1 degradiert,
+    /// 2 nicht zusammensetzbar.
+    ///
+    /// Das ist das Gedaechtnis von `ferrite check`. Es steht im Tagebuch und
+    /// nicht in einer eigenen Datei: Das Tagebuch ist ohnehin die
+    /// Aufzeichnung, und ein zweiter Ort fuer denselben Zustand weicht eines
+    /// Tages ab.
+    ///
+    /// `None` heisst **nichts aufgezeichnet** und nicht „in Ordnung". Der
+    /// Unterschied ist der ganze Punkt: Ein frisch aufgesetztes Array, das
+    /// nie etwas gemeldet hat, sieht sonst aus wie eines, das gerade wieder
+    /// gesund geworden ist.
+    pub last_health: Option<u8>,
 }
 
 /// Die Zusammenfassung als JSON.
@@ -368,6 +423,14 @@ pub fn summary_json(summary: &Summary) -> String {
         ("rebuilds", Value::Number(summary.rebuilds)),
         ("replacements", Value::Number(summary.replacements)),
         ("alerts", Value::Number(summary.alerts)),
+        ("health_changes", Value::Number(summary.health_changes)),
+        (
+            "last_health",
+            match summary.last_health {
+                Some(code) => Value::Number(u64::from(code)),
+                None => Value::Null,
+            },
+        ),
     ])
     .render()
 }
@@ -437,6 +500,10 @@ pub fn summarize(text: &str) -> Summary {
             Event::Rebuilt { .. } => summary.rebuilds += 1,
             Event::Replaced { .. } => summary.replacements += 1,
             Event::Degraded { .. } => {}
+            Event::HealthChanged { to, .. } => {
+                summary.health_changes += 1;
+                summary.last_health = Some(to);
+            }
         }
     }
     summary
@@ -495,6 +562,20 @@ pub fn render(summary: &Summary) -> String {
         "  {:<28} {}",
         "Reparaturen abgelehnt", summary.repairs_refused
     );
+
+    if summary.health_changes > 0 {
+        let _ = writeln!(
+            text,
+            "  {:<28} {}",
+            "Zustandswechsel", summary.health_changes
+        );
+    }
+    // Nur, wenn ueberhaupt etwas aufgezeichnet wurde. `None` heisst nichts
+    // gemeldet und nicht „in Ordnung"; das eine als das andere auszugeben
+    // waere eine Zusage, die niemand gegeben hat.
+    if let Some(code) = summary.last_health {
+        let _ = writeln!(text, "  {:<28} {}", "Zuletzt gemeldet", health_name(code));
+    }
 
     if summary.unreadable > 0 {
         let _ = writeln!(text, "\n{} Zeilen waren nicht lesbar.", summary.unreadable);

@@ -63,6 +63,10 @@ install -D -m 0644 "$HERE/systemd/ferrite-scrub.service" \
                                                    "$STAGE/lib/systemd/system/ferrite-scrub.service"
 install -D -m 0644 "$HERE/systemd/ferrite-scrub.timer" \
                                                    "$STAGE/lib/systemd/system/ferrite-scrub.timer"
+install -D -m 0644 "$HERE/systemd/ferrite-check.service" \
+                                                   "$STAGE/lib/systemd/system/ferrite-check.service"
+install -D -m 0644 "$HERE/systemd/ferrite-check.timer" \
+                                                   "$STAGE/lib/systemd/system/ferrite-check.timer"
 install -D -m 0644 "$HERE/modules-load.d/ferrite.conf" \
                                                    "$STAGE/usr/lib/modules-load.d/ferrite.conf"
 install -D -m 0644 "$HERE/ferrite.conf.example"    "$STAGE/etc/ferrite/ferrite.conf"

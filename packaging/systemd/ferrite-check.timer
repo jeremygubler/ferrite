@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Einmal am Tag reicht, oefter bringt nichts: Ein Member faellt nicht
+# stundenweise aus, und `check` liest dafuer jedes Mal alle Superbloecke —
+# auf Platten, die schlafen sollen.
+
+[Unit]
+Description=Ferrite — taeglich nachsehen
+
+[Timer]
+OnCalendar=daily
+# Nach einem Ausfall nachholen, statt bis morgen zu warten. Eine Kiste, die
+# nur abends laeuft, sieht sonst nie nach.
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

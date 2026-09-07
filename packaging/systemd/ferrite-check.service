@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Der taegliche Blick.
+#
+# Ohne ihn faellt eine ausgefallene Platte erst beim naechsten Scrub auf, und
+# der laeuft monatlich. Drei Wochen degradiert zu laufen, ohne es zu wissen,
+# heisst: Der zweite Ausfall kommt unangekuendigt, und dann ist es zu spaet.
+
+[Unit]
+Description=Ferrite — nachsehen, wie es dem Array geht
+Documentation=man:ferrite(8)
+
+[Service]
+Type=oneshot
+
+# Ohne Geraeteliste: Wo gesucht wird, sagt /etc/ferrite/ferrite.conf. Eine
+# Liste hier waere ein zweiter Ort fuer denselben Zustand.
+ExecStart=/usr/bin/ferrite check
+
+# Rueckgabewert 1 heisst „degradiert" und 2 „nicht zusammensetzbar". Beides
+# soll die Unit scheitern lassen: Ein rotes `systemctl status` ist die
+# Anzeige, die auch dann noch da ist, wenn die Meldung im Postfach untergeht.
+SuccessExitStatus=0
+
+Nice=19
+IOSchedulingClass=idle

@@ -36,6 +36,29 @@ ferrite \(em Werkzeug fuer ein Ferrite\-Array
         ihn zerlegt, bricht beim ersten neuen Wort. Der Rueckgabewert ist in
         beiden Faellen derselbe.
 
+    ferrite check [<GERAET> ...] [\-\-config <DATEI>]
+
+        Der taegliche Blick, fuer den Zeitplan gedacht und nicht fuer die
+        Hand. Sieht nach wie `status` und **meldet sich, wenn sich etwas
+        geaendert hat**: Eintrag ins Tagebuch, Aufruf des `notify`\-Befehls
+        aus der Konfiguration.
+
+        Gemeldet wird nur eine Aenderung. Ein Array, das seit drei Wochen
+        degradiert laeuft, schickt keine 21 Meldungen \(em es hat die eine
+        geschickt, als es degradiert ist. Und die Entwarnung nach einem
+        Rebuild zaehlt als Aenderung: Wer keine bekommt, sieht so lange
+        nach, bis er aufhoert nachzusehen.
+
+        Das Gedaechtnis steht im Tagebuch. Ohne `journal =` in der
+        Konfiguration gibt es nichts zu vergleichen; dann wird der Befund
+        gezeigt und nichts gemeldet.
+
+        Der Timer `ferrite\-check.timer` ruft das taeglich auf. Ohne ihn
+        faellt eine ausgefallene Platte erst beim naechsten Scrub auf \(em
+        also bis zu einen Monat spaeter.
+
+        Rueckgabewert wie `status`.
+
     ferrite run <GERAET> [<GERAET> ...]
                 [\-\-pool <VERZEICHNIS>] [\-\-state\-dir /run/ferrite]
                 [\-\-fstype btrfs]

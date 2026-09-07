@@ -109,6 +109,7 @@ ctl/      create, status, run, scrub, replace, rebuild             [fertig]
           Handbuchseite, .deb und .rpm, in CI installiert         [fertig]
           --json fuer status, discover, journal                    [fertig]
           Cockpit-Modul: anzeigen, nicht bedienen                  [fertig]
+          check: taeglich nachsehen, bei Aenderung melden          [fertig]
           gRPC-Daemon, Bedienung ueber die Oberflaeche               [offen]
 ```
 

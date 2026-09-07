@@ -16,7 +16,7 @@ purge)
     # `enable` angelegt hat — bei `remove` gehoeren sie stehen zu bleiben,
     # damit eine Neuinstallation den Dienst wiederfindet, wie er war.
     if command -v deb-systemd-helper >/dev/null; then
-        for unit in ferrite.service ferrite-scrub.service ferrite-scrub.timer; do
+        for unit in ferrite.service ferrite-scrub.service ferrite-scrub.timer \n                    ferrite-check.service ferrite-check.timer; do
             deb-systemd-helper purge "$unit" >/dev/null 2>&1 || true
             deb-systemd-helper unmask "$unit" >/dev/null 2>&1 || true
         done

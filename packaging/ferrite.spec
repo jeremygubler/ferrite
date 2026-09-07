@@ -25,6 +25,8 @@ Source8:        manifest.json
 Source9:        index.html
 Source10:       ferrite.js
 Source11:       ferrite.css
+Source12:       ferrite-check.service
+Source13:       ferrite-check.timer
 
 Recommends:     btrfs-progs
 Suggests:       cockpit
@@ -49,6 +51,10 @@ install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/ferrite
 install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/ferrite.service
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/ferrite-scrub.service
 install -D -m 0644 %{SOURCE3} %{buildroot}%{_unitdir}/ferrite-scrub.timer
+%{_unitdir}/ferrite-check.service
+%{_unitdir}/ferrite-check.timer
+install -D -m 0644 %{SOURCE12} %{buildroot}%{_unitdir}/ferrite-check.service
+install -D -m 0644 %{SOURCE13} %{buildroot}%{_unitdir}/ferrite-check.timer
 install -D -m 0644 %{SOURCE4} %{buildroot}%{_sysconfdir}/ferrite/ferrite.conf
 install -D -m 0644 %{SOURCE4} %{buildroot}%{_docdir}/ferrite/ferrite.conf.example
 install -D -m 0644 %{SOURCE5} %{buildroot}%{_mandir}/man8/ferrite.8
@@ -71,9 +77,9 @@ fi
 # da ist - `ferrite run` baut auf SIGTERM den Pool ab, dann die Members, dann
 # die Blockgeraete.
 if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
-    systemctl stop ferrite-scrub.timer >/dev/null 2>&1 || true
+    systemctl stop ferrite-scrub.timer ferrite-check.timer >/dev/null 2>&1 || true
     systemctl stop ferrite.service >/dev/null 2>&1 || true
-    systemctl disable ferrite-scrub.timer >/dev/null 2>&1 || true
+    systemctl disable ferrite-scrub.timer ferrite-check.timer >/dev/null 2>&1 || true
     systemctl disable ferrite.service >/dev/null 2>&1 || true
 fi
 

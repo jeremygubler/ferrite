@@ -24,7 +24,12 @@ Ferrite ist installiert, laeuft aber noch nicht.
   2. Array anlegen:   ferrite create --data ... --parity-p ... --log ...
      (zeigt nur den Plan; erst --yes schreibt)
   3. Einschalten:     systemctl enable --now ferrite.service
+                      systemctl enable --now ferrite-check.timer
                       systemctl enable --now ferrite-scrub.timer
+
+Der check-Timer sieht taeglich nach und meldet sich, wenn sich etwas
+aendert. Ohne ihn faellt eine ausgefallene Platte erst beim naechsten
+Scrub auf — also bis zu einen Monat spaeter.
 
 `man 8 ferrite` sagt den Rest.
 
