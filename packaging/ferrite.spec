@@ -51,8 +51,6 @@ install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/ferrite
 install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/ferrite.service
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/ferrite-scrub.service
 install -D -m 0644 %{SOURCE3} %{buildroot}%{_unitdir}/ferrite-scrub.timer
-%{_unitdir}/ferrite-check.service
-%{_unitdir}/ferrite-check.timer
 install -D -m 0644 %{SOURCE12} %{buildroot}%{_unitdir}/ferrite-check.service
 install -D -m 0644 %{SOURCE13} %{buildroot}%{_unitdir}/ferrite-check.timer
 install -D -m 0644 %{SOURCE4} %{buildroot}%{_sysconfdir}/ferrite/ferrite.conf
@@ -93,6 +91,8 @@ fi
 %{_unitdir}/ferrite.service
 %{_unitdir}/ferrite-scrub.service
 %{_unitdir}/ferrite-scrub.timer
+%{_unitdir}/ferrite-check.service
+%{_unitdir}/ferrite-check.timer
 %{_prefix}/lib/modules-load.d/ferrite.conf
 %config(noreplace) %{_sysconfdir}/ferrite/ferrite.conf
 %dir %{_sysconfdir}/ferrite

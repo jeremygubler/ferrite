@@ -172,6 +172,34 @@ fn both_build_ways_lay_down_the_same_things() {
 }
 
 #[test]
+fn the_install_section_of_the_spec_only_installs() {
+    // Gemessen: Eine Ersetzung setzte einen nackten Pfad in `%install`, weil
+    // ihr Anker dort ein zweites Mal vorkam. `rpmbuild` fuehrte ihn als
+    // Befehl aus und brach ab — sichtbar erst in CI, nach dem Push.
+    //
+    // In `%install` steht nichts als `install` und `mkdir`. Das ist eine
+    // Regel, die sich von aussen pruefen laesst, ohne rpmbuild zu haben.
+    let spec = read("packaging/ferrite.spec");
+    let mut im_abschnitt = false;
+    let mut zeilen = 0;
+    for line in spec.lines() {
+        if line.starts_with('%') && !line.starts_with("%{") {
+            im_abschnitt = line.trim() == "%install";
+            continue;
+        }
+        if !im_abschnitt || line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        zeilen += 1;
+        assert!(
+            line.starts_with("install ") || line.starts_with("mkdir "),
+            "in %install steht etwas, das kein install ist: {line}"
+        );
+    }
+    assert!(zeilen > 5, "der %install-Abschnitt wurde nicht gefunden");
+}
+
+#[test]
 fn the_configuration_is_a_conffile_in_both() {
     // Ohne das ueberschreibt die naechste Installation die Konfiguration des
     // Betreibers wortlos. Ein Upgrade, das die Suchpfade zuruecksetzt, ist ein
