@@ -500,7 +500,9 @@ jobs:
               | sort -u
           }
           dpkg -c "${{ steps.build.outputs.deb }}" | awk '$6 ~ /^\.\// && $1 !~ /^d/ {print substr($6,2)}' | liste > /tmp/deb.txt
-          # `-v`, um die Verzeichnisse zu erkennen: dpkg listet sie mit `d`,\n          # rpm ohne `-v` gar nicht als solche.\n          rpm -qlvp "${{ steps.build.outputs.rpm }}" | awk '$1 !~ /^d/ {print $NF}' | liste > /tmp/rpm.txt
+          # `-v`, um die Verzeichnisse zu erkennen: dpkg listet sie mit `d`,
+          # rpm ohne `-v` gar nicht als solche.
+          rpm -qlvp "${{ steps.build.outputs.rpm }}" | awk '$1 !~ /^d/ {print $NF}' | liste > /tmp/rpm.txt
           diff -u /tmp/deb.txt /tmp/rpm.txt
 
       # Das Paket traegt ein gestripptes Binary. Wer einen Backtrace von einer
