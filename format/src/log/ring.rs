@@ -45,6 +45,303 @@ pub enum ReplayStop {
     RingExhausted,
 }
 
+/// Woher die Bytes einer Log-Region kommen.
+///
+/// `format/` bleibt I/O-frei (Regel 2): Diese Eigenschaft **beschreibt** nur,
+/// wie man an einen Ausschnitt kommt. Wer eine Platte anfasst, ist die Engine.
+///
+/// # Warum es das gibt
+///
+/// Die Log-Region ist so gross wie die Payload-Region ihres Members. Sie am
+/// Stueck in den Arbeitsspeicher zu lesen geht bei einem Testarray aus Dateien
+/// gut und bricht auf echter Hardware ab — und zwar nicht mit einem Fehler,
+/// den man zurueckgeben koennte: Eine fehlgeschlagene Allokation beendet den
+/// Prozess. Gemessen auf einer VM mit einem 8-GiB-Log:
+///
+/// ```text
+/// memory allocation of 8588820480 bytes failed
+/// ```
+///
+/// Deshalb laeuft der Absturzpfad ueber diese Eigenschaft. Der Speicherbedarf
+/// haengt danach am groessten **Record**, nicht an der Groesse der Platte.
+pub trait Region {
+    /// Die Laenge der Log-Region in Bytes.
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bis zu `want` Bytes ab `offset`.
+    ///
+    /// Darf **weniger** liefern, wenn die Region vorher endet, und nie mehr.
+    /// Der Ausschnitt gilt bis zum naechsten Aufruf — wer ihn laenger braucht,
+    /// kopiert ihn.
+    fn window(&mut self, offset: usize, want: usize) -> Result<&[u8]>;
+}
+
+/// Eine Region, die ohnehin schon im Speicher liegt.
+///
+/// Kostet nichts: Der Ausschnitt ist ein Teilstueck desselben Slice.
+impl Region for &[u8] {
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn window(&mut self, offset: usize, want: usize) -> Result<&[u8]> {
+        let rest = self.get(offset..).ok_or(FormatError::InvalidField {
+            field: "offset",
+            reason: "hinter dem Ende der Log-Region",
+        })?;
+        Ok(&rest[..want.min(rest.len())])
+    }
+}
+
+/// Schritt 1 aus Abschnitt 5.2 ueber eine Region, die nicht im Speicher liegt.
+///
+/// Ruft `each` fuer jeden Sektor auf, an dem ein gueltiger Header steht.
+/// Gueltig heisst: Magic stimmt **und** `header_crc32c` stimmt.
+///
+/// Ein Sektor, der sich nicht lesen laesst, beendet den Scan nicht — er traegt
+/// dann eben keinen Header. Der Scan ist eine Bestandsaufnahme und kein Urteil.
+pub fn scan_region<R: Region + ?Sized>(
+    region: &mut R,
+    mut each: impl FnMut(usize, LogRecordHeader),
+) -> Result<()> {
+    let sectors = region.len() / LOG_SECTOR_SIZE;
+    for sector in 0..sectors {
+        let Ok(window) = region.window(sector * LOG_SECTOR_SIZE, LOG_HEADER_SIZE) else {
+            continue;
+        };
+        if let Ok(header) = LogRecordHeader::decode(window) {
+            each(sector, header);
+        }
+    }
+    Ok(())
+}
+
+/// Schritt 2: Der `Checkpoint` mit der hoechsten `seq`.
+pub fn newest_checkpoint_of<R: Region + ?Sized>(
+    region: &mut R,
+) -> Result<Option<(usize, LogRecordHeader)>> {
+    let mut best: Option<(usize, LogRecordHeader)> = None;
+    scan_region(region, |sector, header| {
+        if header.record_type != RecordType::Checkpoint {
+            return;
+        }
+        let besser = match &best {
+            Some((_, found)) => header.seq > found.seq,
+            None => true,
+        };
+        if besser {
+            best = Some((sector, header));
+        }
+    })?;
+    Ok(best)
+}
+
+/// Schritt 2, Ersatzweg: der gueltige Header mit der niedrigsten `seq`.
+///
+/// `Padding` bleibt aussen vor — es nimmt an der Kette nicht teil und taugt
+/// deshalb nicht als Anfang.
+pub fn lowest_sequence_of<R: Region + ?Sized>(
+    region: &mut R,
+) -> Result<Option<(usize, LogRecordHeader)>> {
+    let mut best: Option<(usize, LogRecordHeader)> = None;
+    scan_region(region, |sector, header| {
+        if header.record_type == RecordType::Padding {
+            return;
+        }
+        let besser = match &best {
+            Some((_, found)) => header.seq < found.seq,
+            None => true,
+        };
+        if besser {
+            best = Some((sector, header));
+        }
+    })?;
+    Ok(best)
+}
+
+/// Wo der Replay anfangen muss.
+///
+/// Steht hier und nicht zweimal: Der Weg ueber den Speicher und der ueber die
+/// Platte muessen dieselbe Stelle waehlen, sonst spielt der eine zurueck, was
+/// der andere ueberspringt.
+fn replay_start<R: Region + ?Sized>(region: &mut R) -> Result<Option<(usize, u64)>> {
+    let region_len = region.len();
+    if let Some((sector, checkpoint)) = newest_checkpoint_of(region)? {
+        // Auf `seq == u64::MAX` kann kein Nachfolger folgen. Es gibt nichts
+        // anzuwenden.
+        let Some(start_seq) = checkpoint.seq.checked_add(1) else {
+            return Ok(None);
+        };
+        let offset = sector * LOG_SECTOR_SIZE + checkpoint.on_disk_len();
+        let offset = if offset >= region_len { 0 } else { offset };
+        return Ok(Some((offset, start_seq)));
+    }
+    // Ohne Checkpoint bei der niedrigsten gueltigen `seq` anfangen. Der Record
+    // dort gehoert selbst schon zum Replay.
+    Ok(lowest_sequence_of(region)?.map(|(sector, header)| (sector * LOG_SECTOR_SIZE, header.seq)))
+}
+
+/// Ein Record und seine Nutzdaten, wie [`Walk`] sie liefert.
+///
+/// Die Nutzdaten leihen sich den Puffer der Region und gelten nur bis zum
+/// naechsten Aufruf.
+#[derive(Debug)]
+pub struct WalkRecord<'a> {
+    pub offset: usize,
+    pub header: LogRecordHeader,
+    pub payload: &'a [u8],
+}
+
+/// Der Vorwaertslauf aus Abschnitt 5.2 ueber eine [`Region`].
+///
+/// **Hier steht die Regel, sonst nirgends.** [`Replay`] ist nur die Fassung
+/// fuer eine Region, die schon im Speicher liegt, und laeuft ueber dieselbe
+/// Mechanik.
+///
+/// Kein `Iterator`: Der Ausschnitt gilt nur bis zum naechsten Aufruf, und ein
+/// `Iterator` verspraeche mehr, als eingehalten werden kann.
+#[derive(Debug)]
+pub struct Walk<R> {
+    region: R,
+    offset: usize,
+    /// Verbleibende Sektoren. Begrenzt den Lauf auf eine Runde und macht damit
+    /// jede Schleife im Ringpuffer endlich, egal wie kaputt die Daten sind.
+    budget: usize,
+    chain: ChainValidator,
+    stop: Option<ReplayStop>,
+}
+
+impl<R: Region> Walk<R> {
+    /// Setzt den Lauf an die Stelle, die [`replay_start`] bestimmt.
+    pub fn start(mut region: R, generation: u64) -> Result<Self> {
+        check_region(region.len())?;
+        let budget = region.len() / LOG_SECTOR_SIZE;
+        match replay_start(&mut region)? {
+            Some((offset, start_seq)) => Ok(Walk {
+                region,
+                offset,
+                budget,
+                chain: ChainValidator::new(generation, start_seq),
+                stop: None,
+            }),
+            None => Ok(Walk {
+                region,
+                offset: 0,
+                budget: 0,
+                chain: ChainValidator::new(0, 0),
+                stop: Some(ReplayStop::RingExhausted),
+            }),
+        }
+    }
+
+    pub fn stop(&self) -> Option<ReplayStop> {
+        self.stop
+    }
+
+    pub fn accepted_count(&self) -> u64 {
+        self.chain.accepted_count()
+    }
+
+    pub fn last_accepted_seq(&self) -> Option<u64> {
+        self.chain.last_accepted_seq()
+    }
+
+    /// Gibt die Region zurueck — nach dem Lauf, fuer alles Weitere.
+    pub fn into_region(self) -> R {
+        self.region
+    }
+
+    /// Der naechste Record, der angewendet werden darf.
+    ///
+    /// `None` heisst Ende; [`Walk::stop`] sagt, warum.
+    pub fn next_record(&mut self) -> Option<WalkRecord<'_>> {
+        // Erst entscheiden, dann leihen. Die Entscheidung braucht die
+        // Nutzdaten, der Rueckgabewert auch — aber ein Ausschnitt, den die
+        // Schleife noch haelt, laesst sich in der naechsten Runde nicht
+        // wieder anfordern. Also wird er hier fallengelassen und danach ein
+        // zweites Mal geholt. Bei einer Region im Speicher kostet das nichts,
+        // und eine Region auf der Platte merkt sich ihren letzten Ausschnitt.
+        let (offset, header) = loop {
+            if self.stop.is_some() {
+                return None;
+            }
+            if self.budget == 0 {
+                self.stop = Some(ReplayStop::RingExhausted);
+                return None;
+            }
+
+            let offset = self.offset;
+            let region_len = self.region.len();
+
+            let Some(header) = self
+                .region
+                .window(offset, LOG_HEADER_SIZE)
+                .ok()
+                .and_then(|window| LogRecordHeader::decode(window).ok())
+            else {
+                self.stop = Some(ReplayStop::NoHeader { offset });
+                return None;
+            };
+
+            // Abschnitt 5.1: `Padding` traegt keine Nutzdaten und keine
+            // Sequenznummer, die zur Kette gehoert. Es wird uebersprungen, der
+            // naechste Record steht bei Offset 0.
+            if header.record_type == RecordType::Padding {
+                let to_end = region_len - offset;
+                self.budget = self.budget.saturating_sub(to_end / LOG_SECTOR_SIZE);
+                self.offset = 0;
+                continue;
+            }
+
+            let total = header.on_disk_len();
+            if total > region_len - offset {
+                self.stop = Some(ReplayStop::RecordPastEnd { offset });
+                return None;
+            }
+
+            let want = LOG_HEADER_SIZE + header.payload_len as usize;
+            let verdict = {
+                let Self { region, chain, .. } = self;
+                let Ok(window) = region.window(offset, want) else {
+                    break (offset, header);
+                };
+                if window.len() < want {
+                    self.stop = Some(ReplayStop::RecordPastEnd { offset });
+                    return None;
+                }
+                chain.offer(&header, &window[LOG_HEADER_SIZE..want])
+            };
+
+            match verdict {
+                ChainVerdict::StopReplay(reason) => {
+                    self.stop = Some(ReplayStop::Chain(reason));
+                    return None;
+                }
+                ChainVerdict::Accept => {
+                    self.budget -= total / LOG_SECTOR_SIZE;
+                    self.offset = offset + total;
+                    if self.offset >= region_len {
+                        self.offset = 0;
+                    }
+                    break (offset, header);
+                }
+            }
+        };
+
+        let want = LOG_HEADER_SIZE + header.payload_len as usize;
+        let window = self.region.window(offset, want).ok()?;
+        Some(WalkRecord {
+            offset,
+            header,
+            payload: &window[LOG_HEADER_SIZE..want],
+        })
+    }
+}
+
 /// Lesender Blick auf eine Log-Region.
 #[derive(Debug, Clone, Copy)]
 pub struct LogRing<'a> {
@@ -82,9 +379,8 @@ impl<'a> LogRing<'a> {
 
     /// Schritt 2: Der `Checkpoint` mit der hoechsten `seq`.
     pub fn newest_checkpoint(&self) -> Option<(usize, LogRecordHeader)> {
-        self.scan()
-            .filter(|(_, header)| header.record_type == RecordType::Checkpoint)
-            .max_by_key(|(_, header)| header.seq)
+        let mut region = self.region;
+        newest_checkpoint_of(&mut region).ok().flatten()
     }
 
     /// Schritt 2, Ersatzweg: der gueltige Header mit der niedrigsten `seq`.
@@ -92,9 +388,8 @@ impl<'a> LogRing<'a> {
     /// `Padding` bleibt aussen vor — es nimmt an der Kette nicht teil und
     /// taugt deshalb nicht als Anfang.
     pub fn lowest_sequence(&self) -> Option<(usize, LogRecordHeader)> {
-        self.scan()
-            .filter(|(_, header)| header.record_type != RecordType::Padding)
-            .min_by_key(|(_, header)| header.seq)
+        let mut region = self.region;
+        lowest_sequence_of(&mut region).ok().flatten()
     }
 
     /// Schritt 1 bis 4 zusammen: der Replay ab dem richtigen Anfang.
@@ -102,92 +397,73 @@ impl<'a> LogRing<'a> {
     /// `generation` kommt aus dem Superblock des Arrays. Der Rueckgabewert ist
     /// ein Iterator ueber die Records, die angewendet werden duerfen — nicht
     /// mehr und nicht weniger.
+    ///
+    /// Innen laeuft [`Walk`], derselbe Code wie auf der Platte. Der Unterschied
+    /// ist allein, woher die Bytes kommen.
     pub fn replay(&self, generation: u64) -> Replay<'a> {
-        match self.newest_checkpoint() {
-            Some((sector, checkpoint)) => {
-                let Some(start_seq) = checkpoint.seq.checked_add(1) else {
-                    // Auf `seq == u64::MAX` kann kein Nachfolger folgen. Es
-                    // gibt nichts anzuwenden.
-                    return Replay::exhausted(self.region);
-                };
-                let offset = self.wrap(sector * LOG_SECTOR_SIZE + checkpoint.on_disk_len());
-                Replay::new(self.region, offset, generation, start_seq)
-            }
-            // Ohne Checkpoint bei der niedrigsten gueltigen `seq` anfangen. Der
-            // Record dort gehoert selbst schon zum Replay.
-            None => match self.lowest_sequence() {
-                Some((sector, header)) => Replay::new(
-                    self.region,
-                    sector * LOG_SECTOR_SIZE,
-                    generation,
-                    header.seq,
-                ),
-                None => Replay::exhausted(self.region),
+        // `LogRing::new` hat die Region schon geprueft, `Walk::start` kann hier
+        // also nicht scheitern. Faellt diese Zusage doch einmal, ist ein leerer
+        // Replay die sichere Richtung — das Log ist ein Redo-Log, und nichts
+        // anzuwenden laesst das Array, wie es ist. Still soll es trotzdem nicht
+        // passieren, deshalb die Zusicherung.
+        match Walk::start(self.region, generation) {
+            Ok(walk) => Replay {
+                region: self.region,
+                walk,
             },
-        }
-    }
-
-    fn wrap(&self, offset: usize) -> usize {
-        if offset >= self.region.len() {
-            0
-        } else {
-            offset
+            Err(error) => {
+                debug_assert!(
+                    false,
+                    "LogRing::new liess eine ungueltige Region durch: {error:?}"
+                );
+                Replay {
+                    region: self.region,
+                    walk: Walk {
+                        region: self.region,
+                        offset: 0,
+                        budget: 0,
+                        chain: ChainValidator::new(0, 0),
+                        stop: Some(ReplayStop::RingExhausted),
+                    },
+                }
+            }
         }
     }
 }
 
-/// Der Vorwaertslauf aus Abschnitt 5.2, Schritt 3 und 4.
+/// Der Vorwaertslauf aus Abschnitt 5.2, Schritt 3 und 4 — fuer eine Region,
+/// die schon im Speicher liegt.
 ///
 /// Liefert nur Records, die angewendet werden duerfen. Nach dem ersten Bruch
 /// endet der Iterator und [`Replay::stop`] sagt, warum.
-#[derive(Debug, Clone)]
+///
+/// # Was hier absichtlich nicht steht
+///
+/// Die Regel. Die steht in [`Walk`], und diese Fassung laeuft ueber dieselbe
+/// Mechanik — sie reicht nur die Nutzdaten aus der Region weiter, statt sie aus
+/// einem Puffer zu leihen. Damit kann ein `Iterator` daraus werden, was auf der
+/// Platte nicht geht.
+///
+/// Zwei Umsetzungen des Absturzpfads waeren zwei Gelegenheiten, ihn
+/// unterschiedlich falsch zu machen.
+#[derive(Debug)]
 pub struct Replay<'a> {
     region: &'a [u8],
-    offset: usize,
-    /// Verbleibende Sektoren. Begrenzt den Lauf auf eine Runde und macht damit
-    /// jede Schleife im Ringpuffer endlich, egal wie kaputt die Daten sind.
-    budget: usize,
-    chain: ChainValidator,
-    stop: Option<ReplayStop>,
+    walk: Walk<&'a [u8]>,
 }
 
 impl<'a> Replay<'a> {
-    fn new(region: &'a [u8], offset: usize, generation: u64, start_seq: u64) -> Self {
-        Replay {
-            region,
-            offset,
-            budget: region.len() / LOG_SECTOR_SIZE,
-            chain: ChainValidator::new(generation, start_seq),
-            stop: None,
-        }
-    }
-
-    fn exhausted(region: &'a [u8]) -> Self {
-        Replay {
-            region,
-            offset: 0,
-            budget: 0,
-            chain: ChainValidator::new(0, 0),
-            stop: Some(ReplayStop::RingExhausted),
-        }
-    }
-
     /// Warum der Lauf geendet hat, sobald er geendet hat.
     pub fn stop(&self) -> Option<ReplayStop> {
-        self.stop
+        self.walk.stop()
     }
 
     pub fn accepted_count(&self) -> u64 {
-        self.chain.accepted_count()
+        self.walk.accepted_count()
     }
 
     pub fn last_accepted_seq(&self) -> Option<u64> {
-        self.chain.last_accepted_seq()
-    }
-
-    fn halt(&mut self, reason: ReplayStop) -> Option<ReplayRecord<'a>> {
-        self.stop = Some(reason);
-        None
+        self.walk.last_accepted_seq()
     }
 }
 
@@ -195,54 +471,22 @@ impl<'a> Iterator for Replay<'a> {
     type Item = ReplayRecord<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.stop.is_some() {
-                return None;
-            }
-            if self.budget == 0 {
-                return self.halt(ReplayStop::RingExhausted);
-            }
-
-            let offset = self.offset;
-            let Ok(header) = LogRecordHeader::decode(&self.region[offset..]) else {
-                return self.halt(ReplayStop::NoHeader { offset });
-            };
-
-            // Abschnitt 5.1: `Padding` traegt keine Nutzdaten und keine
-            // Sequenznummer, die zur Kette gehoert. Es wird uebersprungen, der
-            // naechste Record steht bei Offset 0.
-            if header.record_type == RecordType::Padding {
-                let to_end = self.region.len() - offset;
-                self.budget = self.budget.saturating_sub(to_end / LOG_SECTOR_SIZE);
-                self.offset = 0;
-                continue;
-            }
-
-            let total = header.on_disk_len();
-            if total > self.region.len() - offset {
-                return self.halt(ReplayStop::RecordPastEnd { offset });
-            }
-            let payload_start = offset + LOG_HEADER_SIZE;
-            let payload = &self.region[payload_start..payload_start + header.payload_len as usize];
-
-            match self.chain.offer(&header, payload) {
-                ChainVerdict::StopReplay(reason) => {
-                    return self.halt(ReplayStop::Chain(reason));
-                }
-                ChainVerdict::Accept => {
-                    self.budget -= total / LOG_SECTOR_SIZE;
-                    self.offset = offset + total;
-                    if self.offset >= self.region.len() {
-                        self.offset = 0;
-                    }
-                    return Some(ReplayRecord {
-                        offset,
-                        header,
-                        payload,
-                    });
-                }
-            }
-        }
+        // Der `Walk` entscheidet; die Nutzdaten kommen danach aus der Region
+        // selbst. Nur deshalb darf das Ergebnis `'a` tragen und nicht nur die
+        // Lebensdauer des Aufrufs.
+        let (offset, header) = {
+            let record = self.walk.next_record()?;
+            (record.offset, record.header)
+        };
+        let payload_start = offset + LOG_HEADER_SIZE;
+        let payload = self
+            .region
+            .get(payload_start..payload_start + header.payload_len as usize)?;
+        Some(ReplayRecord {
+            offset,
+            header,
+            payload,
+        })
     }
 }
 

@@ -370,10 +370,13 @@ fn the_write_log_survives_a_reopen_on_a_real_block_device() {
     assert_eq!(log.next_seq(), 5);
     assert_eq!(log.head(), 4 * LOG_SECTOR_SIZE);
 
-    let seqs: Vec<u64> = recovery
-        .records()
-        .unwrap()
-        .map(|record| record.header.seq)
-        .collect();
+    let seqs: Vec<u64> = {
+        let mut walk = recovery.records(&log).unwrap();
+        let mut seqs = Vec::new();
+        while let Some(record) = walk.next_record() {
+            seqs.push(record.header.seq);
+        }
+        seqs
+    };
     assert_eq!(seqs, vec![1, 2, 3, 4]);
 }

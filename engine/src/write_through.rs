@@ -699,30 +699,38 @@ impl ArrayWriter {
         let mut applied = 0u64;
         let mut touched: Vec<(u64, usize)> = Vec::new();
 
-        for record in recovery.records()? {
-            if record.header.record_type != ferrite_format::log::RecordType::Write {
-                continue;
-            }
-            let slot_index = record.header.slot_index;
-            let offset = record.header.target_offset;
+        // Der Lauf leiht sich das Log; alles, was `self` veraendert, kommt
+        // danach. Und er ist kein `Iterator`: Die Nutzdaten liegen in einem
+        // Puffer, der beim naechsten Record ueberschrieben wird — hier werden
+        // sie sofort angewendet, also reicht das.
+        {
+            let mut walk = recovery.records(&self.log)?;
+            while let Some(record) = walk.next_record() {
+                if record.header.record_type != ferrite_format::log::RecordType::Write {
+                    continue;
+                }
+                let slot_index = record.header.slot_index;
+                let offset = record.header.target_offset;
 
-            // Beide Werte kommen ungeprueft von der Platte. Ohne diese
-            // Pruefung schriebe der Replay ueber das Ende der Payload-Region
-            // hinaus — im besten Fall in den Backup-Superblock.
-            let member = match self.member(slot_index) {
-                Ok(member) => member,
-                Err(_) => break,
-            };
-            if self
-                .check_within(member, offset, record.payload.len())
-                .is_err()
-            {
-                break;
-            }
+                // Beide Werte kommen ungeprueft von der Platte. Ohne diese
+                // Pruefung schriebe der Replay ueber das Ende der
+                // Payload-Region hinaus — im besten Fall in den
+                // Backup-Superblock.
+                let member = match self.member(slot_index) {
+                    Ok(member) => member,
+                    Err(_) => break,
+                };
+                if self
+                    .check_within(member, offset, record.payload.len())
+                    .is_err()
+                {
+                    break;
+                }
 
-            member.write_within(offset, record.payload)?;
-            touched.push((offset, record.payload.len()));
-            applied += 1;
+                member.write_within(offset, record.payload)?;
+                touched.push((offset, record.payload.len()));
+                applied += 1;
+            }
         }
 
         if applied == 0 {

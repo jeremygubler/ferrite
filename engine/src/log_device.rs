@@ -22,9 +22,10 @@
 //! Replay an der falschen Stelle. Ein gesparter Schreibvorgang gegen einen
 //! stillen Datenverlust ist kein Handel.
 
+use ferrite_format::log::ring::{newest_checkpoint_of, scan_region, Region, Walk};
 use ferrite_format::log::{LogRecordHeader, RecordType, LOG_SECTOR_SIZE};
 use ferrite_format::superblock::{Role, Superblock};
-use ferrite_format::{plan_append, FormatError, LogRing, Replay, ReplayStop};
+use ferrite_format::{plan_append, FormatError, ReplayStop};
 
 use crate::device::MemberDevice;
 use crate::error::{EngineError, Result};
@@ -34,6 +35,129 @@ use crate::error::{EngineError, Result};
 /// Gross genug, dass das Nullen einer Region nicht an der Anzahl der Aufrufe
 /// haengt, klein genug, dass der Puffer nicht auffaellt.
 const ZERO_CHUNK: usize = 1 << 20;
+
+/// Groesster Record, den dieses Modul in den Puffer laesst.
+///
+/// # Warum es eine Grenze braucht
+///
+/// `payload_len` ist ein `u32` und kommt ungeprueft von der Platte. Ein
+/// angefressener Header darf behaupten, sein Record sei vier Gigabyte gross —
+/// und wer ihm glaubt und einen Puffer dieser Groesse anlegt, hat den Fehler
+/// bloss verschoben, den dieses Modul beseitigen soll.
+///
+/// Der groesste Record, den der Schreibpfad erzeugen kann, ist ein Header plus
+/// eine ublk-Anfrage; `max_io_buf_bytes` steht bei 512 KiB. 64 MiB sind
+/// hundertfacher Abstand dazu und trotzdem eine Zahl, die jede Maschine haelt.
+/// Was darueber liegt, ist kaputt — und kaputt heisst hier: Der Replay hoert
+/// dort auf, statt zu raten.
+const MAX_RECORD: usize = 64 << 20;
+
+/// Wieviel auf einmal von der Platte geholt wird.
+///
+/// Schritt 1 sieht jeden Sektor an. Sektorweise zu lesen waere eine
+/// Systemanfrage je 4 KiB; so ist es eine je Megabyte, und die uebrigen 255
+/// Sektoren kommen aus demselben Puffer.
+const READ_CHUNK: usize = 1 << 20;
+
+/// Die Log-Region auf der Platte, als `Region` fuer `format/`.
+///
+/// # Der Punkt, um den es geht
+///
+/// Der Puffer waechst bis zur Groesse **eines Records**, nie bis zur Groesse
+/// der Platte. Vorher lag die ganze Region im Arbeitsspeicher; bei einem
+/// 8-GiB-Log endete das mit
+/// `memory allocation of 8588820480 bytes failed` — und eine fehlgeschlagene
+/// Allokation ist kein Fehler, den man zurueckgeben kann, sondern das Ende des
+/// Prozesses.
+#[derive(Debug)]
+pub struct DeviceRegion<'a> {
+    device: &'a MemberDevice,
+    /// Anfang der Log-Region auf dem Geraet.
+    region_offset: u64,
+    region_len: usize,
+    buffer: Vec<u8>,
+    /// Welcher Ausschnitt der Region gerade im Puffer liegt.
+    held: Option<(usize, usize)>,
+    /// Ein Lesefehler, der unterwegs auftrat.
+    ///
+    /// `format::Region` kennt nur seine eigenen Fehler, und ein `EIO` als
+    /// „hier steht kein Header" zu lesen waere genau die Sorte verschluckter
+    /// Fehler, die Regel 5 verbietet: Der Replay hoerte still auf, und niemand
+    /// erfuehre, dass die Log-Platte defekt ist. Deshalb wird er hier
+    /// aufgehoben und nach dem Lauf abgeholt.
+    trouble: Option<EngineError>,
+}
+
+impl<'a> DeviceRegion<'a> {
+    fn new(device: &'a MemberDevice, region_offset: u64, region_len: usize) -> Self {
+        DeviceRegion {
+            device,
+            region_offset,
+            region_len,
+            buffer: Vec::new(),
+            held: None,
+            trouble: None,
+        }
+    }
+
+    /// Der Lesefehler, falls einer auftrat — danach ist er verbraucht.
+    fn take_trouble(&mut self) -> Result<()> {
+        match self.trouble.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Region for DeviceRegion<'_> {
+    fn len(&self) -> usize {
+        self.region_len
+    }
+
+    fn window(&mut self, offset: usize, want: usize) -> ferrite_format::Result<&[u8]> {
+        if offset >= self.region_len {
+            return Err(FormatError::InvalidField {
+                field: "offset",
+                reason: "hinter dem Ende der Log-Region",
+            });
+        }
+        // Am Ende der Region gibt es weniger. Das ist erlaubt und kein Fehler —
+        // wer mehr braucht, merkt es an der Laenge.
+        let want = want.min(self.region_len - offset);
+        if want > MAX_RECORD {
+            return Err(FormatError::InvalidField {
+                field: "payload_len",
+                reason: "Record groesser, als dieser Schreibpfad je einen erzeugt",
+            });
+        }
+
+        // Liegt es schon da? Genau dafuer wird ein ganzes Megabyte geholt und
+        // nicht nur das Verlangte: Der Scan fragt danach 255 weitere Sektoren
+        // aus demselben Puffer ab, und `Walk` fragt jeden Record zweimal.
+        if let Some((start, held)) = self.held {
+            if offset >= start && offset + want <= start + held {
+                let from = offset - start;
+                return Ok(&self.buffer[from..from + want]);
+            }
+        }
+
+        let chunk = want.max(READ_CHUNK).min(self.region_len - offset);
+        self.buffer.resize(chunk, 0);
+        if let Err(error) = self.device.read_at(
+            self.region_offset + offset as u64,
+            &mut self.buffer[..chunk],
+        ) {
+            self.held = None;
+            self.trouble.get_or_insert(error);
+            return Err(FormatError::InvalidField {
+                field: "log_region",
+                reason: "Log-Region nicht lesbar",
+            });
+        }
+        self.held = Some((offset, chunk));
+        Ok(&self.buffer[..want])
+    }
+}
 
 /// Das Write-Log eines Arrays auf seinem Log-Member.
 #[derive(Debug)]
@@ -49,12 +173,12 @@ pub struct DeviceLog {
 
 /// Was ein Replay ergeben hat.
 ///
-/// Haelt die gelesene Region, weil die Records auf sie zeigen. Das ist der eine
-/// Punkt, an dem die ganze Log-Region im Arbeitsspeicher liegt — beim Mounten,
-/// einmal. Fuer den laufenden Betrieb gilt das nicht.
+/// Haelt **nicht** die Region. Sie ist so gross wie die Payload-Region ihres
+/// Members; wer sie festhaelt, bindet den Arbeitsspeicher an die Groesse der
+/// Platte. Die Records holt [`LogRecovery::records`] bei Bedarf noch einmal von
+/// dort — dieselbe Entscheidung, weil dieselbe Regel.
 #[derive(Debug)]
 pub struct LogRecovery {
-    region: Vec<u8>,
     generation: u64,
     /// Kopf des Ringpuffers nach dem letzten akzeptierten Record.
     pub head: usize,
@@ -73,17 +197,15 @@ pub struct LogRecovery {
 impl LogRecovery {
     /// Die akzeptierten Records, in der Reihenfolge ihrer Sequenznummern.
     ///
-    /// Laeuft den Replay erneut ueber die bereits gelesene Region — dieselbe
-    /// Entscheidung wie beim ersten Mal, ohne die Platte noch einmal
-    /// anzufassen.
-    pub fn records(&self) -> Result<Replay<'_>> {
-        // Die Region wurde beim Oeffnen schon einmal angenommen, ein Fehler ist
-        // hier also nicht zu erwarten. Trotzdem zurueckgegeben und nicht
-        // weggeworfen: Regel 5 kennt keine Ausnahme fuer Faelle, die man fuer
-        // unmoeglich haelt — genau die sind es, die spaeter still danebengehen.
-        Ok(LogRing::new(&self.region)
-            .map_err(EngineError::Format)?
-            .replay(self.generation))
+    /// Laeuft den Replay erneut, diesmal von der Platte. Dieselbe Entscheidung
+    /// wie beim Oeffnen, weil dieselbe Mechanik — `Walk` steht an genau einer
+    /// Stelle, in `format/`.
+    ///
+    /// Kein `Iterator`: Die Nutzdaten liegen in einem Puffer, der beim
+    /// naechsten Record ueberschrieben wird. Wer sie behalten will, kopiert
+    /// sie; wer sie anwendet, tut es sofort.
+    pub fn records<'a>(&self, log: &'a DeviceLog) -> Result<Walk<DeviceRegion<'a>>> {
+        Walk::start(log.region(), self.generation).map_err(EngineError::Format)
     }
 }
 
@@ -109,11 +231,6 @@ impl DeviceLog {
     pub fn open(device: MemberDevice, superblock: &Superblock) -> Result<(Self, Box<LogRecovery>)> {
         let mut log = Self::new(device, superblock, 0, 1)?;
 
-        let mut region = vec![0u8; log.region_len];
-        log.device.read_at(log.region_offset, &mut region)?;
-
-        let ring = LogRing::new(&region).map_err(EngineError::Format)?;
-
         // Kopf und naechste Sequenznummer: erst aus dem Replay, und wenn der
         // nichts hergibt, aus dem **Scan**.
         //
@@ -133,80 +250,114 @@ impl DeviceLog {
         // dann gilt weiter, was der Replay sagt. Nach einem Bruch liegen hinter
         // dem Kopf noch Records einer verworfenen Runde; die zu ueberspringen
         // hiesse, den Kopf hinter Muell zu setzen.
-        let mut replay = ring.replay(superblock.generation);
+        let region_len = log.region_len;
         let mut head = 0;
         let mut next_seq = 1;
         let mut accepted = 0;
         let mut first_accepted = None;
-        for record in replay.by_ref() {
-            let plan = plan_append(log.region_len, record.offset, &record.header)
-                .map_err(EngineError::Format)?;
-            first_accepted.get_or_insert(record.offset);
-            head = plan.next_head;
-            next_seq = record.header.seq.saturating_add(1);
-            accepted += 1;
-        }
 
-        // Vor dem Verschieben von `region` abfragen: `replay` leiht sie noch.
-        let stop = replay.stop();
+        // Der Lauf leiht sich das Geraet. Alles, was `log` veraendert, kommt
+        // danach — deshalb der eigene Block.
+        let (stop, discarded) = {
+            let mut walk = Walk::start(
+                DeviceRegion::new(&log.device, log.region_offset, region_len),
+                superblock.generation,
+            )
+            .map_err(EngineError::Format)?;
 
-        // Nach einem Bruch liegt hinter dem Kopf eine verworfene Runde. Sie
-        // dort liegen zu lassen ist gefaehrlich: Der naechste Record schliesst
-        // die Luecke, und dann passen die alten Records **wieder** in die
-        // Kette. Ein spaeterer Replay wendet sie an — alte Writes
-        // ueberschreiben neuere Daten, und niemand merkt es.
-        //
-        // `RingExhausted` ist kein Bruch: Da ist der Replay sauber zu Ende
-        // gekommen, und wer dort aufraeumte, loeschte gueltige Records.
-        // Weggeraeumt werden **nur die Header** der verworfenen Records, nicht
-        // die ganze Spanne. Ein Record ohne gueltigen Header landet nie wieder
-        // in einer Kette, und ein Sektor je Record ist billig — die Spanne zu
-        // nullen koennte bei einem grossen Log-Member Gigabytes bedeuten.
-        //
-        // Dass die Liste leer bleibt, wenn dort ohnehin nichts liegt, ist der
-        // zweite Grund fuer diese Form: Ein `NoHeader` am leeren Ende des Logs
-        // ist kein Bruch, sondern der Normalfall, und es sieht genauso aus.
-        let keep = match ring.newest_checkpoint() {
-            Some((sector, _)) => Some(sector * LOG_SECTOR_SIZE),
-            None => first_accepted,
-        };
-        let discarded: Vec<usize> = match stop {
-            Some(ReplayStop::RingExhausted) | None => Vec::new(),
-            Some(_) => ring
-                .scan()
-                .map(|(sector, _)| sector * LOG_SECTOR_SIZE)
-                .filter(|offset| is_discarded(*offset, head, keep))
-                .collect(),
-        };
-
-        if accepted == 0 {
-            // `Padding` bleibt aussen vor: Es nimmt an der Kette nicht teil und
-            // verbraucht keine Sequenznummer (Abschnitt 5.1). Der Record mit
-            // der hoechsten `seq` ist damit der zuletzt geschriebene, auch nach
-            // einem Umlauf des Ringpuffers.
-            let newest = ring
-                .scan()
-                .filter(|(_, header)| header.record_type != RecordType::Padding)
-                .max_by_key(|(_, header)| header.seq);
-
-            if let Some((sector, header)) = newest {
-                let offset = sector * LOG_SECTOR_SIZE;
-                let plan =
-                    plan_append(log.region_len, offset, &header).map_err(EngineError::Format)?;
+            while let Some(record) = walk.next_record() {
+                let (offset, header) = (record.offset, record.header);
+                let plan = plan_append(region_len, offset, &header).map_err(EngineError::Format)?;
+                first_accepted.get_or_insert(offset);
                 head = plan.next_head;
-                // `saturating_add`: Bei `u64::MAX` bleibt es dabei, und ein
-                // Record mit dieser Nummer beendet die Kette ohnehin
-                // (Abschnitt 5.2).
                 next_seq = header.seq.saturating_add(1);
+                accepted += 1;
             }
-        }
+            let stop = walk.stop();
+            let mut region = walk.into_region();
+
+            // **Zuerst der Lesefehler.** Ein `EIO` sieht von aussen aus wie ein
+            // Kettenbruch: Der Replay hoert auf, und ohne diese Abfrage hiesse
+            // das „hier endet das Log" statt „die Log-Platte antwortet nicht".
+            // Das eine raeumt hinterher auf, das andere gehoert gemeldet.
+            region.take_trouble()?;
+
+            // Nach einem Bruch liegt hinter dem Kopf eine verworfene Runde. Sie
+            // dort liegen zu lassen ist gefaehrlich: Der naechste Record schliesst
+            // die Luecke, und dann passen die alten Records **wieder** in die
+            // Kette. Ein spaeterer Replay wendet sie an — alte Writes
+            // ueberschreiben neuere Daten, und niemand merkt es.
+            //
+            // `RingExhausted` ist kein Bruch: Da ist der Replay sauber zu Ende
+            // gekommen, und wer dort aufraeumte, loeschte gueltige Records.
+            // Weggeraeumt werden **nur die Header** der verworfenen Records, nicht
+            // die ganze Spanne. Ein Record ohne gueltigen Header landet nie wieder
+            // in einer Kette, und ein Sektor je Record ist billig — die Spanne zu
+            // nullen koennte bei einem grossen Log-Member Gigabytes bedeuten.
+            //
+            // Dass die Liste leer bleibt, wenn dort ohnehin nichts liegt, ist der
+            // zweite Grund fuer diese Form: Ein `NoHeader` am leeren Ende des Logs
+            // ist kein Bruch, sondern der Normalfall, und es sieht genauso aus.
+            let keep = match newest_checkpoint_of(&mut region).map_err(EngineError::Format)? {
+                Some((sector, _)) => Some(sector * LOG_SECTOR_SIZE),
+                None => first_accepted,
+            };
+            let discarded: Vec<usize> = match stop {
+                Some(ReplayStop::RingExhausted) | None => Vec::new(),
+                Some(_) => {
+                    let mut found = Vec::new();
+                    scan_region(&mut region, |sector, _| {
+                        let offset = sector * LOG_SECTOR_SIZE;
+                        if is_discarded(offset, head, keep) {
+                            found.push(offset);
+                        }
+                    })
+                    .map_err(EngineError::Format)?;
+                    found
+                }
+            };
+
+            if accepted == 0 {
+                // `Padding` bleibt aussen vor: Es nimmt an der Kette nicht teil
+                // und verbraucht keine Sequenznummer (Abschnitt 5.1). Der
+                // Record mit der hoechsten `seq` ist damit der zuletzt
+                // geschriebene, auch nach einem Umlauf des Ringpuffers.
+                let mut newest: Option<(usize, LogRecordHeader)> = None;
+                scan_region(&mut region, |sector, header| {
+                    if header.record_type == RecordType::Padding {
+                        return;
+                    }
+                    let besser = match &newest {
+                        Some((_, gefunden)) => header.seq > gefunden.seq,
+                        None => true,
+                    };
+                    if besser {
+                        newest = Some((sector, header));
+                    }
+                })
+                .map_err(EngineError::Format)?;
+
+                if let Some((sector, header)) = newest {
+                    let offset = sector * LOG_SECTOR_SIZE;
+                    let plan =
+                        plan_append(region_len, offset, &header).map_err(EngineError::Format)?;
+                    head = plan.next_head;
+                    // `saturating_add`: Bei `u64::MAX` bleibt es dabei, und ein
+                    // Record mit dieser Nummer beendet die Kette ohnehin
+                    // (Abschnitt 5.2).
+                    next_seq = header.seq.saturating_add(1);
+                }
+            }
+
+            region.take_trouble()?;
+            (stop, discarded)
+        };
 
         log.head = head;
         log.next_seq = next_seq;
         Ok((
             log,
             Box::new(LogRecovery {
-                region,
                 generation: superblock.generation,
                 head,
                 next_seq,
@@ -254,6 +405,11 @@ impl DeviceLog {
             next_seq,
             generation: superblock.generation,
         })
+    }
+
+    /// Die Log-Region als `Region` fuer `format/` — ohne sie zu lesen.
+    pub fn region(&self) -> DeviceRegion<'_> {
+        DeviceRegion::new(&self.device, self.region_offset, self.region_len)
     }
 
     pub fn head(&self) -> usize {

@@ -55,6 +55,21 @@ fn log_superblock() -> Superblock {
 }
 
 /// Nutzdaten, die sich von Nullen und voneinander unterscheiden.
+/// Die Sequenznummern der Records, die der Replay annimmt.
+///
+/// Seit der Replay von der Platte laeuft statt aus einer Kopie im Speicher,
+/// ist er kein `Iterator` mehr: Die Nutzdaten liegen in einem Puffer, der beim
+/// naechsten Record ueberschrieben wird. Fuer einen Test, der nur die Nummern
+/// will, ist das eine Schleife.
+fn sequences(recovery: &ferrite_engine::LogRecovery, log: &DeviceLog) -> Vec<u64> {
+    let mut walk = recovery.records(log).unwrap();
+    let mut seqs = Vec::new();
+    while let Some(record) = walk.next_record() {
+        seqs.push(record.header.seq);
+    }
+    seqs
+}
+
 fn payload(marker: u8, len: usize) -> Vec<u8> {
     (0..len).map(|index| (index as u8) ^ marker).collect()
 }
@@ -205,11 +220,7 @@ fn reopening_finds_the_head_and_the_next_sequence_number() {
     assert_eq!(log.next_seq(), 4);
     assert_eq!(log.head(), 3 * LOG_SECTOR_SIZE);
 
-    let seqs: Vec<u64> = recovery
-        .records()
-        .unwrap()
-        .map(|record| record.header.seq)
-        .collect();
+    let seqs = sequences(&recovery, &log);
     assert_eq!(seqs, vec![1, 2, 3]);
 }
 
@@ -351,11 +362,7 @@ fn the_chain_survives_the_wrap() {
     // Nach dem Umlauf steht der Checkpoint irgendwo mitten in der Region und
     // der Record danach am Anfang oder dahinter — der Replay findet ihn
     // trotzdem, und zwar genau ihn.
-    let seqs: Vec<u64> = recovery
-        .records()
-        .unwrap()
-        .map(|record| record.header.seq)
-        .collect();
+    let seqs = sequences(&recovery, &reopened);
     assert_eq!(seqs, vec![after_checkpoint]);
     assert_eq!(reopened.next_seq(), after_checkpoint + 1);
 }
@@ -456,12 +463,8 @@ fn a_record_written_after_a_checkpoint_is_replayed() {
         log.append_write(1, 4096, &payload(2, 128)).unwrap();
     }
 
-    let (_, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
-    let seqs: Vec<u64> = recovery
-        .records()
-        .unwrap()
-        .map(|record| record.header.seq)
-        .collect();
+    let (log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    let seqs = sequences(&recovery, &log);
     assert_eq!(
         seqs,
         vec![3],
@@ -516,12 +519,15 @@ fn records_of_a_discarded_round_do_not_come_back() {
     }
 
     // Und jetzt die Frage: Was findet der naechste Replay?
-    let (_, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
-    let found: Vec<(u64, u16)> = recovery
-        .records()
-        .unwrap()
-        .map(|record| (record.header.seq, record.header.slot_index))
-        .collect();
+    let (log, recovery) = DeviceLog::open(scratch.open(), &log_superblock()).unwrap();
+    let found: Vec<(u64, u16)> = {
+        let mut walk = recovery.records(&log).unwrap();
+        let mut found = Vec::new();
+        while let Some(record) = walk.next_record() {
+            found.push((record.header.seq, record.header.slot_index));
+        }
+        found
+    };
 
     assert_eq!(
         found,
