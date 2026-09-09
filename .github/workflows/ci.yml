@@ -74,6 +74,16 @@ jobs:
       - name: Loop-Geraete-Tests
         run: sudo -E $(cargo test -p ferrite-engine --test loop_device --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*loop_device[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
 
+      # Derselbe Grund, dieselbe Bauweise: Der Test braucht Root, weil
+      # `readlink /proc/1/ns/mnt` Ptrace-Zugriff auf PID 1 verlangt. Ohne
+      # diesen Schritt liefe er nirgends — der Pflichtjob ist nicht Root, und
+      # ein Test, der sich dort selbst abmeldet, waere immer gruen.
+      - name: Testbinary bauen (Namespace)
+        run: cargo test -p ferrite-ctl --test namespace --no-run
+
+      - name: Sieht die Maschine unsere Mounts?
+        run: sudo -E $(cargo test -p ferrite-ctl --test namespace --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*namespace[^"]*"' | tail -1 | cut -d'"' -f4) --ignored --nocapture --test-threads=1
+
       # Ein abgebrochener Test kann ein Loop-Geraet zurueckgelassen haben. Auf
       # einem Runner ist das folgenlos, aber es soll im Log stehen.
       - name: Reste melden

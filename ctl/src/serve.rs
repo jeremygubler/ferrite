@@ -81,6 +81,26 @@ pub fn run(plan: &RunPlan) -> Result<()> {
     }
 
     let (settings, config) = resolve(plan)?;
+
+    // Bevor eine einzige Platte geoeffnet wird: Wuerde der Pool ueberhaupt
+    // jemand sehen? Diese Pruefung steht hier vorn und nicht hinter dem
+    // Einhaengen, weil die Antwort sich unterwegs nicht aendert — und weil ein
+    // Abbruch nach zwei Minuten Recovery derselbe Abbruch ist, nur spaeter.
+    if settings.pool.is_some() {
+        match crate::namespace::look() {
+            crate::namespace::Visibility::Private => {
+                return Err(CtlError::Missing {
+                    what: crate::namespace::IM_EIGENEN_NAMESPACE,
+                })
+            }
+            // Nicht nachsehen zu koennen ist kein Grund, den Dienst zu
+            // verweigern — aber einer, es zu sagen.
+            crate::namespace::Visibility::Unknown(grund) => {
+                eprintln!("Hinweis: {grund} — ob der Pool sichtbar wird, ist ungeprueft.");
+            }
+            crate::namespace::Visibility::Shared => {}
+        }
+    }
     let writer = crate::run::open_array(&settings.devices)?;
 
     // Je Slot seine **eigene** Groesse. Members duerfen verschieden gross

@@ -34,6 +34,8 @@ pub mod journal;
 pub mod json;
 /// Die Handbuchseite, erzeugt aus derselben Quelle wie die Hilfe.
 pub mod man;
+/// Sieht die Maschine, was wir einhaengen? Die Beurteilung ist plattformfrei.
+pub mod namespace;
 /// Scrub, Ersatz und Rebuild. Braucht Geraete, aber weder ublk noch FUSE.
 #[cfg(unix)]
 pub mod repair;
