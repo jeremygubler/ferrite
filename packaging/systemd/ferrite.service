@@ -35,11 +35,22 @@ TimeoutStopSec=300
 Restart=on-failure
 RestartSec=10
 
-# ublk und FUSE brauchen Root. Was sich trotzdem einschraenken laesst, ist
-# eingeschraenkt.
-ProtectHome=yes
-ProtectHostname=yes
-ProtectKernelLogs=no
+# Kein eigener Mount-Namespace. Das ist keine vergessene Haertung, sondern die
+# Bedingung dafuer, dass dieser Dienst ueberhaupt einen Zweck hat.
+#
+# `ProtectHome=`, `ProtectHostname=`, `PrivateTmp=` und ihresgleichen sperren
+# den Dienst in einen eigenen Mount-Namespace. Ferrite haengt den Pool dann
+# wirklich ein — nur eben dort drin, und niemand ausserhalb sieht ihn. Der
+# Dienst laeuft, meldet „Pool eingehaengt unter /mnt/pool", und `findmnt`
+# findet nichts. Ein Dateiserver, dessen Dateien nur er selbst sieht.
+#
+# `MountFlags=shared` waere der scheinbare Ausweg und ist der falsche: Dann
+# propagierte auch das leere tmpfs, das `ProtectHome=` ueber /home legt, nach
+# aussen — und /home waere systemweit weg.
+PrivateMounts=no
+
+# ublk und FUSE brauchen Root. Was sich ohne Mount-Namespace einschraenken
+# laesst, ist eingeschraenkt.
 NoNewPrivileges=yes
 
 [Install]

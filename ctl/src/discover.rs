@@ -146,12 +146,6 @@ pub fn group(found: Vec<Found>) -> Scan {
     }
 }
 
-/// Sieht sich alles an, was in den angegebenen Verzeichnissen liegt.
-///
-/// Ein Pfad, der sich nicht oeffnen oder nicht lesen laesst, wird
-/// uebergangen — in `/dev/disk/by-id` liegt vieles, was kein Ferrite-Member
-/// ist, und jedes davon zu melden waere Laerm statt Auskunft.
-#[cfg(unix)]
 /// Der Suchlauf als JSON.
 ///
 /// Dieselbe Auskunft wie die Textausgabe, nur ohne Saetze. Groessen in Bytes.
@@ -215,6 +209,12 @@ fn role_name(role: ferrite_format::superblock::Role) -> &'static str {
     }
 }
 
+/// Sieht sich alles an, was in den angegebenen Verzeichnissen liegt.
+///
+/// Ein Pfad, der sich nicht oeffnen oder nicht lesen laesst, wird
+/// uebergangen — in `/dev/disk/by-id` liegt vieles, was kein Ferrite-Member
+/// ist, und jedes davon zu melden waere Laerm statt Auskunft.
+#[cfg(unix)]
 pub fn scan(directories: &[PathBuf]) -> Scan {
     use ferrite_engine::{read_superblock, MemberDevice};
 

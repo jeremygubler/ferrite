@@ -465,3 +465,88 @@ fn the_manual_and_the_example_agree_on_where_the_configuration_lives() {
         "die conffiles-Liste nennt einen anderen Pfad als die Installation"
     );
 }
+
+/// Direktiven, die systemd dazu bringen, dem Dienst einen eigenen
+/// Mount-Namespace zu geben.
+///
+/// Die Liste steht in `systemd.exec(5)`; jede dieser Optionen traegt dort den
+/// Satz „Implies `PrivateMounts=yes`". Sie ist bewusst als Literale
+/// aufgeschrieben und nicht abgeleitet: Wer eine davon in die Unit setzt, tut
+/// es beim Haerten mit den besten Absichten, und genau dann soll ein Test
+/// dazwischengehen.
+const SPERRT_DIE_MOUNTS_EIN: &[&str] = &[
+    "PrivateTmp",
+    "PrivateDevices",
+    "PrivateUsers",
+    "ProtectSystem",
+    "ProtectHome",
+    "ProtectHostname",
+    "ProtectKernelTunables",
+    "ProtectKernelLogs",
+    "ProtectControlGroups",
+    "ProtectProc",
+    "ProcSubset",
+    "ReadOnlyPaths",
+    "ReadWritePaths",
+    "InaccessiblePaths",
+    "NoExecPaths",
+    "ExecPaths",
+    "BindPaths",
+    "BindReadOnlyPaths",
+    "TemporaryFileSystem",
+    "MountAPIVFS",
+    "RootDirectory",
+    "RootImage",
+    "DynamicUser",
+];
+
+fn ist_aus(wert: &str) -> bool {
+    matches!(wert.trim(), "no" | "false" | "off" | "0")
+}
+
+#[test]
+fn the_service_that_mounts_the_pool_may_not_be_locked_into_its_own_namespace() {
+    // Der Fehler, der das hier ausgeloest hat: `ProtectHome=yes` stand in der
+    // Unit. Der Dienst startete, meldete „Pool eingehaengt unter /mnt/pool",
+    // und auf der Maschine war nichts eingehaengt — der Mount lag im
+    // Namespace des Dienstes und blieb dort. Ein Dateiserver, dessen Dateien
+    // nur er selbst sieht, faellt in keinem Startlauf auf: `systemctl status`
+    // sagt „active (running)", das Journal sagt „Bereit.".
+    let unit = read("packaging/systemd/ferrite.service");
+
+    for zeile in unit.lines() {
+        let zeile = zeile.trim();
+        if zeile.starts_with('#') {
+            continue;
+        }
+        let Some((schluessel, wert)) = zeile.split_once('=') else {
+            continue;
+        };
+        let schluessel = schluessel.trim();
+        // Nicht „die Option kommt nicht vor", sondern „sie ist nicht
+        // eingeschaltet". `ProtectKernelLogs=no` darf dastehen und sagt genau
+        // das Richtige.
+        assert!(
+            !SPERRT_DIE_MOUNTS_EIN.contains(&schluessel) || ist_aus(wert),
+            "ferrite.service setzt {schluessel}={wert} — das gibt dem Dienst einen \
+             eigenen Mount-Namespace, und der Pool waere nur fuer ihn selbst sichtbar"
+        );
+    }
+
+    // Und die Zusage steht ausdruecklich da, statt sich aus dem Fehlen von
+    // zwanzig anderen Zeilen zu ergeben.
+    assert!(
+        unit.lines()
+            .any(|zeile| zeile.trim().starts_with("PrivateMounts=")
+                && ist_aus(zeile.split_once('=').map(|(_, wert)| wert).unwrap_or(""))),
+        "ferrite.service sagt nirgends PrivateMounts=no"
+    );
+
+    // `MountFlags=shared` ist der Ausweg, der schlimmer ist als das Problem:
+    // Er liesse die Sandbox-Mounts nach aussen propagieren.
+    assert!(
+        !unit.contains("\nMountFlags="),
+        "ferrite.service setzt MountFlags — der Pool gehoert in den Namespace des Wirts, \
+         nicht die Sandbox in die Welt"
+    );
+}
